@@ -46,7 +46,7 @@ services:
       RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       HF_HOME: /models
     volumes:
-      - ~/hf-cache:/models        # weights cached on your SSD, downloaded once
+      - /home/adwait_tiwari/hf-cache:/models        # weights cached on your SSD, downloaded once
     ports:
       - "8081:8081"
     deploy:
@@ -114,7 +114,7 @@ services:
       HF_HOME: /models
     volumes:
       - ${CORPUS_DIR:-./corpus}:/data:ro
-      - ~/hf-cache:/models
+      - /home/adwait_tiwari/hf-cache:/models
     depends_on:
       db:
         condition: service_healthy
