@@ -1,0 +1,20 @@
+{"question": "What are the four layers under the Scale Based Regulation framework?", "expect_text": "Base Layer"}
+{"question": "How is an NBFC in the Upper Layer identified?", "expect_text": "Upper Layer"}
+{"question": "When must an NBFC appoint a Chief Risk Officer?", "expect_text": "Chief Risk Officer"}
+{"question": "What governance obligations apply to an NBFC-UL?", "expect_text": "Nomination and Remuneration Committee"}
+{"question": "What is the minimum CRAR and the Tier I requirement?", "expect_text": "Capital to Risk-weighted Asset Ratio"}
+{"question": "What extra capital must an Upper Layer NBFC hold?", "expect_text": "Common Equity Tier 1"}
+{"question": "When does an account become sub-standard, doubtful or loss?", "expect_text": "sub-standard"}
+{"question": "What provisioning applies to loss assets?", "expect_text": "Loss assets"}
+{"question": "How often must KYC be updated for high risk customers?", "expect_text": "periodic updation"}
+{"question": "Which identity documents are accepted for customer due diligence?", "expect_text": "Officially Valid Document"}
+{"question": "What is the Key Facts Statement?", "expect_text": "Key Facts Statement"}
+{"question": "What are the rules on penal charges?", "expect_text": "penal charges"}
+{"question": "What is the ceiling on public deposits for an NBFC-D?", "expect_text": "accept or renew public deposit"}
+{"question": "What liquid assets must a deposit taking NBFC maintain?", "expect_text": "unencumbered approved securities"}
+{"question": "What loan to value applies to gold loans?", "expect_text": "Loan to Value"}
+{"question": "Can an NBFC lend against the security of its own shares?", "expect_text": "its own shares"}
+{"question": "When must divergence in asset classification be disclosed?", "expect_text": "divergence"}
+{"question": "Which schedule governs presentation of financial statements?", "expect_text": "notes to accounts"}
+{"question": "What are the tolerance limits on cumulative negative mismatches?", "expect_text": "cumulative negative mismatch"}
+{"question": "Which NBFCs must maintain a Liquidity Coverage Ratio?", "expect_text": "Liquidity Coverage Ratio"}
