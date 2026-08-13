@@ -25,8 +25,12 @@ import httpx
 
 
 def hit(result: dict, case: dict) -> bool:
-    if "expect_text" in case:
-        if case["expect_text"].lower() in result["text"].lower():
+    # A question can be answered from more than one passage once the corpus holds
+    # several regulations restating the same rule. Accept any listed phrase rather
+    # than insisting on one blessed chunk.
+    wanted = case.get("expect_any") or ([case["expect_text"]] if "expect_text" in case else [])
+    for phrase in wanted:
+        if phrase.lower() in result["text"].lower():
             return True
     if "expect_source" in case:
         if case["expect_source"].lower() in result["source"].lower():

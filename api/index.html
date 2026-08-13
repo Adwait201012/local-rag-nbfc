@@ -3,149 +3,210 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local knowledge base</title>
+<title>Document intelligence</title>
 <style>
   :root{
-    --ink:#161a20; --panel:#1e242c; --line:#2c343f;
+    --ink:#161a20; --panel:#1e242c; --line:#2c343f; --panel2:#171c23;
     --text:#dde3ea; --muted:#8b9aa8;
-    --signal:#5ec8c0;      /* retrieval / dense */
-    --warm:#e0a44a;        /* rerank / lexical */
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+    --signal:#5ec8c0; --warm:#e0a44a; --bad:#e07a6a;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);line-height:1.55}
   header{border-bottom:1px solid var(--line);padding:14px 22px;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
   h1{font:600 15px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;margin:0}
   #stats{font:12px var(--mono);color:var(--muted)}
-  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:0;min-height:calc(100vh - 52px)}
-  #left{padding:22px;min-width:0}
-  #right{border-left:1px solid var(--line);padding:22px;overflow:auto;background:#171c23}
+  main{display:grid;grid-template-columns:270px minmax(0,1fr) 330px;min-height:calc(100vh - 52px)}
+  #docs{border-right:1px solid var(--line);padding:18px;background:var(--panel2);overflow:auto}
+  #mid{padding:22px;min-width:0}
+  #right{border-left:1px solid var(--line);padding:18px;background:var(--panel2);overflow:auto}
+  h2{font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  #drop{border:1px dashed var(--line);border-radius:8px;padding:22px 12px;text-align:center;
+        color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
+  #drop:hover,#drop.over{border-color:var(--signal);color:var(--text);background:#1b222a}
+  .doc{border-top:1px solid var(--line);padding:10px 0;display:flex;gap:8px;align-items:flex-start}
+  .doc:first-of-type{border-top:0}
+  .doc-main{flex:1;min-width:0}
+  .doc-name{font-size:13px;overflow-wrap:anywhere}
+  .doc-meta{font:11px var(--mono);color:var(--muted);margin-top:2px}
+  .del{background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:2px 4px}
+  .del:hover{color:var(--bad)}
+  .job{font:11px var(--mono);padding:6px 0;border-top:1px solid var(--line);color:var(--muted)}
+  .job b{color:var(--text);font-weight:400}
+  .job.parsing b{color:var(--warm)} .job.done b{color:var(--signal)} .job.error b{color:var(--bad)}
   form{display:flex;gap:8px}
-  input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  input[type=text]{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;
         color:var(--text);padding:12px 14px;font:15px var(--sans)}
-  input:focus{outline:2px solid var(--signal);outline-offset:1px}
-  button{background:var(--signal);color:#0d1114;border:0;border-radius:6px;padding:0 20px;
+  input[type=text]:focus{outline:2px solid var(--signal);outline-offset:1px}
+  button.go{background:var(--signal);color:#0d1114;border:0;border-radius:6px;padding:0 20px;
          font:600 14px var(--sans);cursor:pointer}
-  button:disabled{opacity:.45;cursor:progress}
+  button.go:disabled{opacity:.45;cursor:progress}
   #answer{margin-top:24px;white-space:pre-wrap;font-size:15.5px;max-width:70ch}
   #answer cite{font-style:normal;color:var(--signal);font-family:var(--mono);font-size:.9em}
-  .empty{color:var(--muted);max-width:60ch}
-  .empty code{font-family:var(--mono);color:var(--warm)}
-  h2{font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
-     color:var(--muted);margin:0 0 14px}
-  .src{border-top:1px solid var(--line);padding:12px 0}
+  .empty{color:var(--muted);font-size:13px}
+  .src{border-top:1px solid var(--line);padding:11px 0}
   .src:first-of-type{border-top:0}
   .src-head{display:flex;gap:8px;align-items:baseline;font:12px var(--mono)}
   .rank{color:var(--signal)}
-  .name{color:var(--text);overflow-wrap:anywhere}
   .loc{color:var(--muted);font:11px var(--mono);margin-top:2px}
-  /* signature: every passage shows how it earned its place —
-     fusion rank from hybrid search, then the cross-encoder's verdict */
-  .bars{margin-top:8px;display:grid;grid-template-columns:52px 1fr;gap:4px 8px;align-items:center}
-  .bars span{font:10px var(--mono);color:var(--muted);letter-spacing:.06em}
-  .bar{height:3px;background:#2a323c;border-radius:2px;overflow:hidden}
-  .bar i{display:block;height:100%}
-  .bar.fuse i{background:var(--signal)}
-  .bar.rank i{background:var(--warm)}
-  @media(max-width:860px){main{grid-template-columns:1fr}#right{border-left:0;border-top:1px solid var(--line)}}
+  .bar{height:3px;background:#2a323c;border-radius:2px;overflow:hidden;margin-top:7px}
+  .bar i{display:block;height:100%;background:var(--warm)}
+  @media(max-width:1000px){main{grid-template-columns:1fr}
+    #docs,#right{border:0;border-top:1px solid var(--line)}}
 </style>
 </head>
 <body>
 <header>
-  <h1>Local knowledge base</h1>
+  <h1>Document intelligence</h1>
   <span id="stats">connecting…</span>
 </header>
 <main>
-  <div id="left">
+  <div id="docs">
+    <h2>Your documents</h2>
+    <div id="drop">Drop files here<br>or click to choose</div>
+    <input type="file" id="picker" multiple hidden
+           accept=".pdf,.docx,.pptx,.xlsx,.html,.md,.txt,.png,.jpg,.jpeg">
+    <div id="joblist"></div>
+    <div id="doclist" class="empty" style="margin-top:14px">Loading…</div>
+  </div>
+
+  <div id="mid">
     <form id="ask">
-      <input id="q" placeholder="Ask something the indexed documents can answer" autocomplete="off" autofocus>
-      <button id="go" type="submit">Ask</button>
+      <input type="text" id="q" placeholder="Ask anything about your documents" autocomplete="off" autofocus>
+      <button class="go" id="gobtn" type="submit">Ask</button>
     </form>
     <div id="answer" class="empty">
-      Answers come only from what you have indexed. Add files to your corpus folder and run
-      <code>docker compose run --rm ingest /data</code>, then ask away.
+      Answers come only from documents you have added. Nothing is sent anywhere —
+      this runs entirely on this machine.
     </div>
   </div>
+
   <div id="right">
-    <h2>Passages used</h2>
-    <div id="sources" class="empty" style="font-size:13px">Retrieved passages appear here, with the score each one earned.</div>
+    <h2>Sources used</h2>
+    <div id="sources" class="empty">Passages behind each answer appear here.</div>
   </div>
 </main>
 <script>
 const $ = s => document.querySelector(s);
+const esc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
-fetch('/health').then(r => r.json()).then(h => {
-  const d = h.db && h.db.documents !== undefined
-    ? `${h.db.documents} documents · ${h.db.chunks} chunks`
-    : 'database not ready';
-  $('#stats').textContent = `${d} · embeddings ${h.embeddings} · ollama ${h.ollama}`;
-}).catch(() => $('#stats').textContent = 'api unreachable');
+async function refreshStats(){
+  try{
+    const h = await (await fetch('/health')).json();
+    $('#stats').textContent = h.db && h.db.documents !== undefined
+      ? `${h.db.documents} documents · ${h.db.chunks} passages indexed`
+      : 'database not ready';
+  }catch{ $('#stats').textContent = 'api unreachable'; }
+}
+
+async function refreshDocs(){
+  try{
+    const d = (await (await fetch('/api/documents')).json()).documents;
+    const box = $('#doclist');
+    if(!d.length){ box.className='empty'; box.textContent='No documents yet. Add one above.'; return; }
+    box.className='';
+    box.innerHTML = d.map(x => `<div class="doc">
+      <div class="doc-main">
+        <div class="doc-name">${esc(x.name)}</div>
+        <div class="doc-meta">${x.chunks} passages · ${esc(x.added)}</div>
+      </div>
+      <button class="del" title="Remove" onclick="removeDoc(${x.id})">&times;</button>
+    </div>`).join('');
+  }catch(e){ $('#doclist').textContent = 'Could not load documents.'; }
+}
+
+async function removeDoc(id){
+  if(!confirm('Remove this document and everything indexed from it?')) return;
+  await fetch('/api/documents/'+id, {method:'DELETE'});
+  refreshDocs(); refreshStats();
+}
+
+let polling = false;
+async function refreshJobs(){
+  try{
+    const jobs = (await (await fetch('/api/jobs')).json()).jobs
+      .filter(j => j.status !== 'done' || Date.now() - (window._seen?.[j.id]||0) < 8000);
+    window._seen = window._seen || {};
+    jobs.forEach(j => { if(j.status === 'done' && !window._seen[j.id]) window._seen[j.id] = Date.now(); });
+    $('#joblist').innerHTML = jobs.map(j => `<div class="job ${j.status}">
+      ${esc(j.filename)} — <b>${j.status === 'parsing' ? 'reading…' : esc(j.message || j.status)}</b>
+    </div>`).join('');
+    const busy = jobs.some(j => j.status === 'queued' || j.status === 'parsing');
+    if(busy && !polling){ polling = true; }
+    if(!busy && polling){ polling = false; refreshDocs(); refreshStats(); }
+  }catch{}
+}
+setInterval(refreshJobs, 2000);
+
+async function send(files){
+  for(const f of files){
+    const fd = new FormData(); fd.append('file', f);
+    await fetch('/api/upload', {method:'POST', body: fd});
+  }
+  refreshJobs();
+}
+
+$('#drop').onclick = () => $('#picker').click();
+$('#picker').onchange = e => send(e.target.files);
+['dragenter','dragover'].forEach(ev => $('#drop').addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.add('over'); }));
+['dragleave','drop'].forEach(ev => $('#drop').addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.remove('over'); }));
+$('#drop').addEventListener('drop', e => send(e.dataTransfer.files));
 
 function renderSources(list){
   const box = $('#sources');
-  if(!list.length){ box.className='empty'; box.textContent='No passage matched. Try different wording, or index more documents.'; return; }
+  if(!list.length){ box.className='empty'; box.textContent='No passage matched. Try different wording, or add more documents.'; return; }
   box.className='';
-  const scores = list.map(s => s.rerank_score ?? 0);
-  const lo = Math.min(...scores), hi = Math.max(...scores);
-  const norm = v => hi === lo ? 1 : (v - lo) / (hi - lo);
+  const sc = list.map(s => s.rerank_score ?? 0);
+  const lo = Math.min(...sc), hi = Math.max(...sc);
+  const norm = v => hi === lo ? 1 : (v - lo)/(hi - lo);
   box.innerHTML = list.map((s,i) => {
     const file = s.source.split('/').pop();
-    const loc = [s.page ? 'p.' + s.page : null, s.heading].filter(Boolean).join(' · ');
+    const loc = [s.page ? 'p.'+s.page : null, s.heading].filter(Boolean).join(' · ');
     return `<div class="src">
-      <div class="src-head"><span class="rank">[${i+1}]</span><span class="name">${esc(file)}</span></div>
+      <div class="src-head"><span class="rank">[${i+1}]</span><span>${esc(file)}</span></div>
       ${loc ? `<div class="loc">${esc(loc)}</div>` : ''}
-      <div class="bars">
-        <span>hybrid</span><div class="bar fuse"><i style="width:${(1-i/list.length)*100}%"></i></div>
-        <span>rerank</span><div class="bar rank"><i style="width:${(0.15+0.85*norm(s.rerank_score ?? 0))*100}%"></i></div>
-      </div>
+      <div class="bar"><i style="width:${(0.15+0.85*norm(s.rerank_score??0))*100}%"></i></div>
     </div>`;
   }).join('');
 }
-
-const esc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
 $('#ask').addEventListener('submit', async e => {
   e.preventDefault();
   const query = $('#q').value.trim();
   if(!query) return;
-  $('#go').disabled = true;
+  $('#gobtn').disabled = true;
   const out = $('#answer');
-  out.className = ''; out.textContent = '';
-  $('#sources').className = 'empty'; $('#sources').textContent = 'retrieving…';
-
+  out.className=''; out.textContent='';
+  $('#sources').className='empty'; $('#sources').textContent='searching…';
   try{
-    const res = await fetch('/api/chat', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ query })
-    });
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '', event = '';
+    const res = await fetch('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({query})});
+    const reader = res.body.getReader(); const dec = new TextDecoder();
+    let buf='', event='';
     while(true){
-      const {done, value} = await reader.read();
-      if(done) break;
+      const {done, value} = await reader.read(); if(done) break;
       buf += dec.decode(value, {stream:true});
       const parts = buf.split('\n\n'); buf = parts.pop();
-      for(const block of parts){
-        for(const line of block.split('\n')){
-          if(line.startsWith('event: ')) event = line.slice(7).trim();
-          else if(line.startsWith('data: ')){
-            const data = JSON.parse(line.slice(6));
-            if(event === 'sources') renderSources(data);
-            if(event === 'token'){ out.textContent += data; }
-          }
+      for(const block of parts) for(const line of block.split('\n')){
+        if(line.startsWith('event: ')) event = line.slice(7).trim();
+        else if(line.startsWith('data: ')){
+          const data = JSON.parse(line.slice(6));
+          if(event === 'sources') renderSources(data);
+          if(event === 'token') out.textContent += data;
         }
       }
     }
-    out.innerHTML = esc(out.textContent).replace(/\[(\d+)\]/g, '<cite>[$1]</cite>');
+    out.innerHTML = esc(out.textContent).replace(/\[(\d+)\]/g,'[$1]');
   }catch(err){
-    out.className = 'empty';
-    out.textContent = 'The request failed: ' + err.message + '. Check docker compose logs api.';
-  }finally{
-    $('#go').disabled = false;
-  }
+    out.className='empty';
+    out.textContent = 'Something went wrong: ' + err.message;
+  }finally{ $('#gobtn').disabled = false; }
 });
+
+refreshStats(); refreshDocs(); refreshJobs();
 </script>
 </body>
 </html>

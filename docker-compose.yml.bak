@@ -92,11 +92,6 @@ services:
       NUM_CTX: ${NUM_CTX:-8192}
       TOP_K_CANDIDATES: ${TOP_K_CANDIDATES:-40}
       TOP_K_FINAL: ${TOP_K_FINAL:-6}
-      INGEST_URL: http://ingest:8082
-      APP_PASSWORD: ${APP_PASSWORD:-}
-      SESSION_SECRET: ${SESSION_SECRET:-rag-dev-secret}
-    volumes:
-      - ./corpus:/data
     ports:
       - "8080:8080"
     depends_on:
@@ -111,23 +106,20 @@ services:
   # `docker compose up` will not start it.
   ingest:
     build: ./ingest
+    profiles: ["tools"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-ragpass}@db:5432/${POSTGRES_DB:-rag}
       EMBED_URL: http://embeddings:8081
       MAX_TOKENS: ${CHUNK_MAX_TOKENS:-512}
       HF_HOME: /models
     volumes:
-      - ./corpus:/data
+      - ${CORPUS_DIR:-./corpus}:/data:ro
       - /home/adwait_tiwari/hf-cache:/models
-      - /home/adwait_tiwari/rapidocr-models:/usr/local/lib/python3.12/site-packages/rapidocr/models
     depends_on:
       db:
         condition: service_healthy
       embeddings:
         condition: service_healthy
-    entrypoint: ["uvicorn", "worker:app", "--host", "0.0.0.0", "--port", "8082"]
-    ports:
-      - "8082:8082"
 
 volumes:
   pgdata:

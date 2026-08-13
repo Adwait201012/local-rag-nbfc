@@ -12,6 +12,8 @@ neither orders the survivors well enough for a small context window.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -19,8 +21,12 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+import re
+import shutil
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import (HTMLResponse, JSONResponse,
+                               RedirectResponse, StreamingResponse)
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
@@ -177,6 +183,72 @@ async def stream_answer(query: str, passages: list[dict], temperature: float) ->
 
 # ---------------------------------------------------------------- endpoints
 
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "rag-dev-secret")
+OPEN_PATHS = {"/login", "/api/login", "/health", "/api/search"}
+
+
+def session_token() -> str:
+    return hmac.new(SESSION_SECRET.encode(), b"session-v1", hashlib.sha256).hexdigest()
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    # No password set = wide open. That is fine on your own machine and
+    # unacceptable the moment this is reachable from the internet.
+    if not APP_PASSWORD:
+        return await call_next(request)
+    if request.url.path in OPEN_PATHS:
+        return await call_next(request)
+    if hmac.compare_digest(request.cookies.get("rag_session", ""), session_token()):
+        return await call_next(request)
+    if request.url.path.startswith(("/api", "/v1")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return RedirectResponse("/login", status_code=302)
+
+
+@app.post("/api/login")
+async def login(body: dict) -> JSONResponse:
+    if not APP_PASSWORD or not hmac.compare_digest(
+            str(body.get("password", "")), APP_PASSWORD):
+        return JSONResponse({"ok": False}, status_code=401)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("rag_session", session_token(), httponly=True,
+                    samesite="lax", max_age=60 * 60 * 24 * 30)
+    return resp
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page() -> str:
+    return """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title>
+<style>
+body{margin:0;height:100vh;display:grid;place-items:center;background:#161a20;color:#dde3ea;
+     font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.box{width:300px;text-align:center}
+h1{font:600 13px/1 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;
+   color:#8b9aa8;margin:0 0 20px}
+input{width:100%;background:#1e242c;border:1px solid #2c343f;border-radius:6px;color:#dde3ea;
+      padding:12px 14px;font-size:15px;margin-bottom:10px}
+input:focus{outline:2px solid #5ec8c0;outline-offset:1px}
+button{width:100%;background:#5ec8c0;color:#0d1114;border:0;border-radius:6px;padding:12px;
+       font:600 14px sans-serif;cursor:pointer}
+#err{color:#e07a6a;font-size:13px;height:18px;margin-top:10px}
+</style></head><body><div class="box">
+<h1>Document intelligence</h1>
+<input type="password" id="p" placeholder="Password" autofocus>
+<button onclick="go()">Sign in</button>
+<div id="err"></div>
+</div><script>
+async function go(){
+  const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({password:document.getElementById('p').value})});
+  if(r.ok) location.href='/'; else document.getElementById('err').textContent='Wrong password';
+}
+document.getElementById('p').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+</script></body></html>"""
+
+
 @app.get("/health")
 async def health() -> dict:
     out = {"api": "ok"}
@@ -251,6 +323,63 @@ async def openai_chat(body: dict) -> dict:
         "model": "rag",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
     }
+
+
+UPLOAD_DIR = "/data"
+INGEST_URL = os.getenv("INGEST_URL", "http://ingest:8082")
+SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]")
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)) -> dict:
+    name = SAFE_NAME.sub("_", os.path.basename(file.filename or "upload"))
+    with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    try:
+        r = await state["http"].post(f"{INGEST_URL}/ingest",
+                                     json={"filename": name}, timeout=30)
+        return {"filename": name, **r.json()}
+    except Exception as exc:
+        return {"filename": name, "error": f"saved, but indexing failed: {exc}"}
+
+
+@app.get("/api/jobs")
+async def jobs() -> dict:
+    async with state["pool"].connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT id, filename, status, message, n_chunks "
+                              "FROM jobs ORDER BY id DESC LIMIT 20")
+            rows = await cur.fetchall()
+    keys = ("id", "filename", "status", "message", "n_chunks")
+    return {"jobs": [dict(zip(keys, r)) for r in rows]}
+
+
+@app.get("/api/documents")
+async def documents() -> dict:
+    async with state["pool"].connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT id, source_path, n_chunks, ingested_at "
+                              "FROM documents ORDER BY id DESC")
+            rows = await cur.fetchall()
+    return {"documents": [{"id": r[0], "name": os.path.basename(r[1]),
+                           "chunks": r[2], "added": r[3].strftime("%d %b %H:%M")}
+                          for r in rows]}
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: int) -> dict:
+    async with state["pool"].connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM documents WHERE id=%s RETURNING source_path",
+                              (doc_id,))
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "no such document")
+    try:
+        os.remove(row[0])
+    except OSError:
+        pass
+    return {"deleted": doc_id}
 
 
 @app.get("/", response_class=HTMLResponse)
