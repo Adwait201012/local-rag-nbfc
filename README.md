@@ -1,144 +1,193 @@
-# Local RAG stack — RTX 5070 (12 GB) / 32 GB RAM / 1 TB SSD
+# Local RAG over Indian NBFC regulation
 
-Fully local, fully open. No API keys, nothing leaves the machine.
+A fully self-hosted retrieval-augmented generation system. Every component is
+open source and runs on one consumer GPU. No API keys, no cloud, no data leaving
+the machine.
+
+Built and measured on the RBI's consolidated 2025 NBFC Master Directions —
+46 documents, 2,181 passages.
 
 ```
-Docling → bge-m3 → Postgres+pgvector → bge-reranker-v2-m3 → Qwen3 8B (Ollama)
- parse    embed     hybrid retrieval        rerank              generate
+documents ──► Docling ──► chunks ──► bge-m3 ──┐
+   (CPU)      parse + chunk         embed     │
+                                              ▼
+              query ──► bge-m3 ──►  Postgres + pgvector
+                                    HNSW  ∪  full-text  ──► RRF fusion (top 40)
+                                              │
+                                              ▼
+                                    bge-reranker-v2-m3  ──► top 6
+                                              │
+                                              ▼
+                                    Ollama / Qwen3-8B  ──► answer with [n] citations
 ```
 
-Every component is Apache-2.0 / MIT / PostgreSQL-licensed. Nothing here restricts
-commercial or multi-tenant use, so this can become a product later.
+## Measured results
 
-## The VRAM budget — this drives every model choice
+Twenty questions with hand-verified answers, drawn from the indexed Master
+Directions. `eval/questions.jsonl` and `eval/evaluate.py` are in this repo.
 
-12 GB is plenty for good RAG, but not for a large LLM *and* the retrieval models
-at once. The split below is why the stack is shaped the way it is:
+| corpus | retrieval | recall@6 | MRR |
+|---|---|---|---|
+| 2,181 chunks | hybrid only | 0.95 | 0.787 |
+| 2,181 chunks | hybrid + rerank | **1.00** | **0.912** |
 
-| Container | On GPU | VRAM |
+**Read this honestly.** Twenty questions is a small set, they were written by me
+against a corpus I chose, and the pass condition is "a passage containing the
+answer appeared in the top 6" — not "the generated answer was correct." The
+number says the retriever is finding the right material; it does not say the
+system is 100% accurate. See *Open problems* below.
+
+## Stack
+
+| Layer | Choice | Licence |
 |---|---|---|
-| `ollama` | qwen3:8b Q4_K_M | ~5.2 GB |
-| `embeddings` | bge-m3 + bge-reranker-v2-m3, both fp16 | ~2.5 GB |
-| `ingest` | nothing — Docling runs on CPU deliberately | 0 GB |
-| | **total** | **~7.7 GB** |
+| Parsing & chunking | Docling (HybridChunker), RapidOCR fallback | MIT |
+| Embeddings | BAAI/bge-m3, 1024-dim, 100+ languages | MIT |
+| Store & retrieval | Postgres 17 + pgvector HNSW + tsvector, fused with RRF | PostgreSQL / MIT |
+| Reranking | BAAI/bge-reranker-v2-m3 cross-encoder | Apache-2.0 |
+| Generation | Ollama serving Qwen3-8B Q4_K_M | MIT / Apache-2.0 |
+| API & UI | FastAPI + one HTML page | this repo |
 
-That leaves ~4 GB of headroom for KV cache growth and long-context queries. Two
-consequences worth knowing before you change anything:
+All permissively licensed. Nothing here restricts commercial use.
 
-- **Don't jump to a 14B model.** At Q4 it's ~9 GB on its own and will evict the
-  embedder. If you want 14B, set the embeddings service to CPU first.
-- **Ingestion is CPU-only on purpose.** Docling's layout models would otherwise
-  take ~2 GB while you're serving. On CPU, parsing is slower but you can index a
-  corpus while still answering queries. 32 GB RAM handles this comfortably.
+## Design decisions, and why
 
-Disk: ~15 GB for model weights, plus roughly 1 GB of Postgres per ~250k chunks
-including the HNSW index. A 1 TB SSD is not close to a constraint here.
+**Hybrid search, not pure vector.** Dense embeddings are strong on paraphrase and
+useless on exact tokens — regulation is full of paragraph numbers, thresholds and
+identifiers that carry no semantic meaning. Postgres full-text search catches
+those. Both run, and results are merged.
 
-## The Blackwell gotcha — read before installing
+**RRF, not weighted score addition.** Cosine similarity and BM25 produce scores on
+incomparable scales; adding them is adding rupees to kilometres. Reciprocal Rank
+Fusion discards the scores and keeps only ranks: each result scores
+`1/(60 + rank)` from each list. A passage both retrievers merely like can beat one
+a single retriever loves.
 
-The RTX 5070 is compute capability **sm_120**. CUDA 12.8 was the first release to
-add the Blackwell targets, and PyTorch 2.7.0 was the first stable build shipping
-sm_120 wheels — anything older refuses to run on the card. The embeddings
-Dockerfile therefore pins `pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`. Don't
-downgrade that base image.
+**Retrieve 40, rerank to 6.** bge-m3 is a bi-encoder — question and passage are
+embedded separately, so every passage is pre-computed and search is fast but
+approximate. The reranker is a cross-encoder that reads question and passage
+together: far more accurate, far too slow for a whole corpus. Wide cheap net, then
+careful judgement. Measured contribution of the reranker at 2,181 chunks:
+recall +0.05, MRR +0.125.
 
-You also need the **NVIDIA Container Toolkit** so Docker can see the GPU:
+**Postgres rather than a dedicated vector database.** Under ~10M vectors pgvector
+is simpler: one container, ordinary SQL joins against document metadata, and
+transactional consistency between documents and chunks.
+
+**Parsing on CPU, retrieval on GPU.** The 12 GB budget is ~8.6 GB resident —
+Qwen3-8B with a q8_0 KV cache, plus bge-m3 and the reranker in fp16. Docling would
+want several GB more and would evict the language model mid-conversation, so it
+runs on system RAM instead.
+
+## Experiments that failed
+
+Recorded because the failures were more informative than the successes.
+
+**1. Chunk size 512 → 1024.** Hypothesis: the failures were lists split across
+chunk boundaries, so bigger chunks would keep them whole.
+Result: identical after reranking (0.80 → 0.80), and hybrid-only recall *dropped*
+0.75 → 0.70. Longer chunks average more topics into one vector, so first-stage
+retrieval got worse and the reranker absorbed the damage. Chunk size was not the
+bottleneck.
+
+**2. Splitting oversized chunks at enumeration markers.** 231 of 615 chunks
+exceeded 2,000 characters — heterogeneous definition sections where the answer sat
+at, in one measured case, character 2,842 of 3,101. Splitting at `(i)`, `(1)`, `(a)`
+boundaries reduced oversized chunks to 137 and doubled the count to 1,195.
+Result: recall fell 0.85 → 0.80, and a previously passing question broke. In
+regulatory text sub-clauses are not independent — clause (1) reads "in the case
+of…" and means nothing without its parent. The chunks got smaller and dumber.
+Reverted.
+
+**3. Assuming low chunk counts meant truncated parsing.** Three documents produced
+8–16 chunks where others produced 40–83. Checked by comparing Docling's extracted
+character count against the sum of stored chunk lengths: 6,907 vs 6,926. Nothing
+was lost — those Master Directions are genuinely short. A false alarm resolved by
+measurement rather than assumption.
+
+## The eval bug
+
+The most useful finding in the project.
+
+Retrieval scored 0.80 while the system visibly answered several "failed" questions
+correctly. The cause was in `evaluate.py`: a question counted as a hit only if one
+specific expected string appeared in a retrieved chunk. Once the corpus held 46
+overlapping regulations, the same rule appeared in several places — the retriever
+returned a perfectly good passage from a different Master Direction and the eval
+scored it a miss.
+
+Three separate versions of this bug turned up:
+
+- **Wrong strings.** `Net Owned Fund` matched four chunks, none of which was the
+  deposit-ceiling rule — it appears in definitions and capital sections too.
+- **Notation mismatch.** Searching for `Tier I` returned zero results; the
+  documents write `Tier 1` with a digit. A real answer, invisible to the test.
+- **Questions the corpus could not answer.** Some expected facts came from a web
+  summary of all 34 Master Directions, not the subset actually indexed.
+
+Fixing the ruler moved recall 0.80 → 0.85 → 1.00 without a single change to the
+retrieval pipeline.
+
+The general lesson: **an eval that checks for retrieval of one specific chunk is
+not measuring answer correctness**, and the two diverge as a corpus grows. Tuning
+a retriever against a broken eval is a way to spend weeks going nowhere.
+
+## Open problems
+
+Known limitations, none of them solved:
+
+- **No contradiction detection.** When two retrieved passages disagree — a rule
+  superseded by a later direction — the system picks one and sounds certain. In a
+  compliance context that is a wrong answer with consequences.
+- **No cross-chunk reasoning.** The cross-encoder scores each passage in
+  isolation, so it cannot recognise that two chunks are only useful together.
+- **Silent parsing loss.** Five chunks contain `formula-not-decoded` where Docling
+  dropped content it could not parse. Nothing warns you; retrieval simply cannot
+  find text that was never extracted.
+- **No per-user isolation.** A single shared password, one document pool. Two
+  users would see each other's files.
+- **OCR is Chinese/English-trained.** Fine on the RBI's digital PDFs, where it
+  barely fires. Untested and probably poor on scanned Devanagari, which is the
+  case that actually matters for Indian document work.
+
+## Running it
+
+Requires Docker with the NVIDIA Container Toolkit, an NVIDIA driver of 580 or
+newer, and roughly 12 GB of VRAM.
 
 ```bash
-nvidia-smi                                             # driver present?
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
+cp .env.example .env     # set APP_PASSWORD and SESSION_SECRET
+make up                  # build and start db, embeddings, ollama, api, ingest
+make model               # pull qwen3:8b into Ollama (~5 GB)
+make health              # all four services should report ok
 ```
 
-If the second command fails, install the container toolkit before going further.
-Linux or WSL2 both work; WSL2 is the smoother path on Windows.
+Then open `http://localhost:8080`, drag documents onto the left panel, and ask
+questions once they finish indexing.
 
-## Setup
+First start downloads ~10 GB of images and model weights. Everything is cached
+afterwards, so later starts take seconds.
+
+### Evaluating
 
 ```bash
-cp .env.example .env          # defaults are fine to start
-make up                       # build + start db, embeddings, ollama, api
-make model                    # pull qwen3:8b into Ollama (~5 GB)
-make health                   # confirm all four components are talking
-
-cp ~/your-docs/*.pdf corpus/
-make ingest                   # parse, chunk, embed, store
+python3 -m venv .venv && .venv/bin/pip install httpx
+.venv/bin/python eval/evaluate.py eval/questions.jsonl
 ```
 
-Then open **http://localhost:8080** for the chat UI, or:
+Prints recall and MRR with and without reranking. Write your own questions before
+trusting the numbers in this README — and check that every expected phrase
+actually appears in your corpus, or you will measure the ruler instead of the
+system.
 
-```bash
-curl -s localhost:8080/api/search -H 'content-type: application/json' \
-  -d '{"query":"what is the warranty period?"}' | python3 -m json.tool
-```
+### Notes on the build
 
-First boot downloads ~2.5 GB of embedding weights and ~5 GB of model — the
-`embeddings` healthcheck allows for that, so give it a few minutes.
+Blackwell GPUs (RTX 50-series, sm_120) need CUDA 12.8 or newer, which is why the
+embeddings image is pinned to `pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`.
 
-## Why each piece is there
+Ingestion runs as a serial queue backed by the `jobs` table rather than in-process
+background tasks. Parsing is CPU-bound, so concurrent jobs only thrash; and jobs
+that survive in the database can be resumed after a restart instead of being lost.
 
-**Docling for parsing, not PyPDF.** This is where home-built RAG quietly fails: a
-table flattened into a wall of numbers is unretrievable no matter how good your
-embeddings are. Docling preserves layout, reading order, headings and tables. If
-your documents are scanned or heavily CJK, swap in MinerU.
-
-**Structure-aware chunking at 512 tokens.** Chunking is the highest-leverage
-index-time decision — wrong chunk shape degrades retrieval more than almost any
-other knob. Fixed-size splitting cuts sentences and tables mid-thought.
-
-**Hybrid retrieval, fused in SQL.** Dense search cannot handle
-`ERR_SSL_PROTOCOL_ERROR` or part number `WX-4200` — semantic similarity is
-meaningless for an identifier. Postgres full-text catches those; the vector index
-catches paraphrase. The `hybrid_search()` function in `db/init.sql` merges both
-with reciprocal rank fusion, which needs no score normalisation between two very
-different scales.
-
-**Rerank 40 down to 6.** The cross-encoder sees query and passage *together*,
-which is why it ranks far better than the bi-encoder that produced the embeddings.
-This is usually the single biggest quality jump available without changing models.
-Passing raw top-5 vector hits straight to the LLM is the most common way to leave
-quality on the table.
-
-**Only 6 passages reach the LLM.** Stuffing in 20 dilutes attention and makes
-answers worse, not better.
-
-**An OpenAI-compatible endpoint** at `/v1/chat/completions`, so you can point Open
-WebUI, LibreChat, or any OpenAI SDK at this and get grounded answers with
-citations instead of raw model output.
-
-## When answers are bad, debug in this order
-
-Retrieval is the culprit far more often than generation:
-
-1. `python eval/evaluate.py` — if hit@5 is low, the answer never reached the LLM
-   and no prompt engineering will fix it.
-2. **Bad hit@5** → parsing or chunking. Call `/api/search` and read the actual
-   chunks. Are tables intact? Are chunks cut mid-sentence?
-3. **Good hit@5, bad hit@1** → ranking. Raise `TOP_K_CANDIDATES`, or raise
-   `hnsw.ef_search` if recall looks thin.
-4. **Good retrieval, bad answer** → *now* look at the prompt or a bigger model.
-
-Write `eval/questions.jsonl` (20–30 questions with known answer locations) on day
-one. Without it, every "improvement" is a coin flip.
-
-## Growing out of this
-
-- **>10M chunks** → move to Qdrant. Below that, keeping documents, metadata and
-  vectors in one Postgres is a real operational advantage.
-- **Many concurrent users** → replace Ollama with vLLM. But vLLM pre-allocates
-  ~90% of VRAM for its KV cache at startup, so on 12 GB it will fight the
-  embedder; you'd move retrieval models to CPU or a second box.
-- **A polished UI** → point Open WebUI or AnythingLLM at the `/v1` endpoint.
-  Avoid Dify if you ever intend to sell this: its licence bars multi-tenant use
-  without written permission from LangGenius.
-- **Tracing** → add Langfuse (MIT core) and instrument `api/app.py`.
-
-## Layout
-
-```
-db/init.sql              schema + hybrid_search() RRF function
-embeddings/server.py     bge-m3 + reranker held resident on GPU (:8081)
-ingest/ingest.py         Docling parse → chunk → embed → store (CPU, one-shot)
-api/app.py               retrieval + generation + OpenAI-compatible API (:8080)
-api/index.html           minimal chat UI
-eval/evaluate.py         retrieval regression harness
-```
+RapidOCR downloads its weights to a mounted directory rather than into the
+container, so a rebuild does not force a re-download from a slow remote host.
