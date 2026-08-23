@@ -4,3 +4,5 @@ corpus/
 __pycache__/
 *.pyc
 .env
+*.bak
+.claude/
