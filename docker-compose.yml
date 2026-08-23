@@ -46,7 +46,7 @@ services:
       RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       HF_HOME: /models
     volumes:
-      - /home/adwait_tiwari/hf-cache:/models        # weights cached on your SSD, downloaded once
+      - ${HF_CACHE:-./models}:/models        # weights cached on your SSD, downloaded once
     ports:
       - "8081:8081"
     deploy:
@@ -118,8 +118,8 @@ services:
       HF_HOME: /models
     volumes:
       - ./corpus:/data
-      - /home/adwait_tiwari/hf-cache:/models
-      - /home/adwait_tiwari/rapidocr-models:/usr/local/lib/python3.12/site-packages/rapidocr/models
+      - ${HF_CACHE:-./models}:/models
+      - ${OCR_CACHE:-./ocr-models}:/usr/local/lib/python3.12/site-packages/rapidocr/models
     depends_on:
       db:
         condition: service_healthy
