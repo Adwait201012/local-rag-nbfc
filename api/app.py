@@ -94,7 +94,24 @@ async def rerank(query: str, docs: list[str], top_k: int) -> list[dict]:
     return r.json()["results"]
 
 
+# RBI directions write the layers as abbreviations ("NBFC - BL") while people
+# ask in full words ("Base Layer"). Keyword search cannot bridge that gap, and
+# the one-line passages that hold these rules get outranked. Adding the
+# abbreviation to the query lets both searches match the actual wording.
+LAYER_ABBREVIATIONS = {
+    "base layer": "BL", "middle layer": "ML",
+    "upper layer": "UL", "top layer": "TL",
+}
+
+
+def expand_abbreviations(query: str) -> str:
+    low = query.lower()
+    extra = [f"NBFC-{a} NBFC - {a}" for full, a in LAYER_ABBREVIATIONS.items() if full in low]
+    return f"{query} {' '.join(extra)}" if extra else query
+
+
 async def retrieve(query: str, top_k: int, use_rerank: bool = True) -> list[dict]:
+    query = expand_abbreviations(query)
     vec = await embed_query(query)
     async with state["pool"].connection() as conn:
         async with conn.cursor() as cur:
