@@ -94,50 +94,33 @@ async def rerank(query: str, docs: list[str], top_k: int) -> list[dict]:
     return r.json()["results"]
 
 
-# RBI directions write the layers as abbreviations ("NBFC - BL") while people
-# ask in full words ("Base Layer"). Keyword search cannot bridge that gap, and
-# the one-line passages that hold these rules get outranked. Adding the
-# abbreviation to the query lets both searches match the actual wording.
-LAYER_ABBREVIATIONS = {
-    "base layer": "BL", "middle layer": "ML",
-    "upper layer": "UL", "top layer": "TL",
-}
-
-
-def expand_abbreviations(query: str) -> str:
-    low = query.lower()
-    extra = [f"NBFC-{a} NBFC - {a}" for full, a in LAYER_ABBREVIATIONS.items() if full in low]
-    return f"{query} {' '.join(extra)}" if extra else query
-
-
-async def retrieve(query: str, top_k: int, use_rerank: bool = True) -> list[dict]:
-    query = expand_abbreviations(query)
-    vec = await embed_query(query)
+async def _candidates(q: str) -> list[dict]:
+    vec = await embed_query(q)
     async with state["pool"].connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT chunk_id, doc_id, source, heading, page, text, score "
                 "FROM hybrid_search(%s::vector, %s, %s)",
-                (str(vec), query, TOP_K_CANDIDATES),
+                (str(vec), q, TOP_K_CANDIDATES),
             )
             rows = await cur.fetchall()
+    return [{"chunk_id": r[0], "doc_id": r[1], "source": r[2], "heading": r[3],
+             "page": r[4], "text": r[5], "fusion_score": float(r[6])} for r in rows]
 
-    candidates = [
-        {
-            "chunk_id": r[0], "doc_id": r[1], "source": r[2], "heading": r[3],
-            "page": r[4], "text": r[5], "fusion_score": float(r[6]),
-        }
-        for r in rows
-    ]
-    if not candidates:
+
+async def retrieve(query: str, top_k: int, use_rerank: bool = True) -> list[dict]:
+    # The question is used exactly as typed. Layer abbreviations are normalised
+    # in the documents at index time instead (see ingest.normalize_layers), because
+    # every attempt to patch the question helped one kind of page and hurt another.
+    cands = await _candidates(query)
+    if not cands:
         return []
     if not use_rerank:
-        return candidates[:top_k]
-
-    ranked = await rerank(query, [c["text"] for c in candidates], top_k)
+        return cands[:top_k]
+    ranked = await rerank(query, [c["text"] for c in cands], top_k)
     out = []
     for item in ranked:
-        c = dict(candidates[item["index"]])
+        c = dict(cands[item["index"]])
         c["rerank_score"] = item["score"]
         out.append(c)
     return out

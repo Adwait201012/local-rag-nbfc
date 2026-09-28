@@ -24,6 +24,20 @@ import httpx
 import psycopg
 from psycopg.types.json import Json  # noqa: F401  (kept for future metadata use)
 
+import re as _re
+
+# RBI writes the regulatory layers two ways: "NBFC - BL" in some directions,
+# "Base Layer" in others. People ask in full words. Spelling the full name out
+# next to each abbreviation at index time means a plain-language question
+# matches either style, without altering the question at all.
+LAYER_NAMES = {"BL": "Base Layer", "ML": "Middle Layer", "UL": "Upper Layer", "TL": "Top Layer"}
+LAYER_ABBR = _re.compile(r"(NBFC\s*[-\u2013]\s*(BL|ML|UL|TL))\b(?!\s*\()")
+
+
+def normalize_layers(text: str) -> str:
+    return LAYER_ABBR.sub(lambda m: f"{m.group(1)} ({LAYER_NAMES[m.group(2)]})", text)
+
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 EMBED_URL = os.getenv("EMBED_URL", "http://embeddings:8081")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
@@ -151,6 +165,8 @@ def ingest_file(conn: psycopg.Connection, client: httpx.Client, path: Path, rein
         return "skip"
 
     chunks = extract(path)
+    for c in chunks:
+        c["text"] = normalize_layers(c["text"])
     if not chunks:
         return "empty"
 
