@@ -18,7 +18,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 import re
@@ -45,7 +45,34 @@ Rules:
 - If the passages do not contain the answer, say so plainly. Do not fill the gap from
   general knowledge, and do not guess.
 - Quote exact figures, names and identifiers from the passages rather than paraphrasing them.
+- Understand English, Hindi (Devanagari), and Hinglish (Hindi written in Latin script,
+  possibly mixed with English). Passages may be in a different language from the question.
+- Unless a response language is specified, answer in the question's language and script:
+  Hindi in Devanagari, Hinglish in Latin script, and English in English.
+- Preserve the original numbers, dates, regulation identifiers, and [n] citations in every language.
 - Be concise. No preamble."""
+
+ResponseLanguage = Literal["auto", "en", "hi", "hinglish"]
+LANGUAGE_RULES = {
+    "auto": "Follow the question's language and script.",
+    "en": "Write the answer in English.",
+    "hi": "Write the answer in Hindi using Devanagari script.",
+    "hinglish": "Write the answer in Hinglish: conversational Hindi in Latin script mixed with English terms.",
+}
+
+
+def answer_prompt(language: str = "auto") -> str:
+    if not isinstance(language, str) or language not in LANGUAGE_RULES:
+        raise HTTPException(422, "language must be auto, en, hi, or hinglish")
+    return SYSTEM_PROMPT + "\nResponse language: " + LANGUAGE_RULES[language]
+
+
+def no_match(query: str, language: str) -> str:
+    if language == "hi" or (language == "auto" and re.search(r"[\u0900-\u097f]", query)):
+        return "इंडेक्स किए गए दस्तावेज़ों में इस प्रश्न से संबंधित जानकारी नहीं मिली।"
+    if language == "hinglish":
+        return "Indexed documents mein is sawaal se judi jaankari nahi mili."
+    return "Nothing in the indexed corpus matches that query."
 
 state: dict[str, Any] = {}
 
@@ -76,6 +103,7 @@ class ChatRequest(BaseModel):
     query: str
     top_k: int = Field(default=TOP_K_FINAL, ge=1, le=20)
     temperature: float = 0.2
+    language: ResponseLanguage = "auto"
 
 
 # ---------------------------------------------------------------- retrieval
@@ -154,16 +182,16 @@ async def ollama_chat(messages: list[dict], temperature: float, stream: bool):
     return r.json()["message"]["content"]
 
 
-async def stream_answer(query: str, passages: list[dict], temperature: float) -> AsyncIterator[str]:
+async def stream_answer(query: str, passages: list[dict], temperature: float, language: str = "auto") -> AsyncIterator[str]:
     yield f"event: sources\ndata: {json.dumps([{k: v for k, v in p.items() if k != 'text'} for p in passages])}\n\n"
 
     if not passages:
-        yield f"event: token\ndata: {json.dumps('Nothing in the indexed corpus matches that query.')}\n\n"
+        yield f"event: token\ndata: {json.dumps(no_match(query, language))}\n\n"
         yield "event: done\ndata: {}\n\n"
         return
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": answer_prompt(language)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
     ]
     payload = await ollama_chat(messages, temperature, stream=True)
@@ -282,7 +310,7 @@ async def api_search(req: SearchRequest) -> dict:
 async def api_chat(req: ChatRequest) -> StreamingResponse:
     passages = await retrieve(req.query, req.top_k)
     return StreamingResponse(
-        stream_answer(req.query, passages, req.temperature),
+        stream_answer(req.query, passages, req.temperature, req.language),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -302,14 +330,16 @@ async def openai_chat(body: dict) -> dict:
     if not user_turns:
         raise HTTPException(400, "no user message")
     query = user_turns[-1]["content"]
+    language = body.get("language", "auto")
+    system_prompt = answer_prompt(language)
 
     passages = await retrieve(query, TOP_K_FINAL)
     prompt = f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"
     answer = await ollama_chat(
-        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
         float(body.get("temperature", 0.2)),
         stream=False,
-    )
+    ) if passages else no_match(query, language)
     if passages:
         cited = "\n".join(
             f"[{i}] {os.path.basename(p['source'])}" + (f" p.{p['page']}" if p.get("page") else "")
@@ -327,7 +357,7 @@ async def openai_chat(body: dict) -> dict:
 
 UPLOAD_DIR = "/data"
 INGEST_URL = os.getenv("INGEST_URL", "http://ingest:8082")
-SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]")
+SAFE_NAME = re.compile(r"[^A-Za-z0-9\u0900-\u097f._ -]")
 
 
 @app.post("/api/upload")

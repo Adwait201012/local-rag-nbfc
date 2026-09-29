@@ -1,0 +1,3 @@
+{"template":true,"language":"hi","question":"इस परिपत्र के अनुसार रिपोर्ट जमा करने की समय सीमा क्या है?","expect_source":"YOUR_SCANNED_CIRCULAR.pdf","expect_page":1,"expect_text":"REPLACE_WITH_VERIFIED_HINDI_EVIDENCE"}
+{"template":true,"language":"hinglish","question":"Is circular ke hisaab se report jama karne ki deadline kya hai?","expect_source":"YOUR_SCANNED_CIRCULAR.pdf","expect_page":1,"expect_text":"REPLACE_WITH_VERIFIED_HINDI_EVIDENCE"}
+{"template":true,"language":"en","question":"What is the reporting deadline according to this circular?","expect_source":"YOUR_SCANNED_CIRCULAR.pdf","expect_page":1,"expect_text":"REPLACE_WITH_VERIFIED_HINDI_EVIDENCE"}

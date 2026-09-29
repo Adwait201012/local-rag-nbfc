@@ -11,10 +11,10 @@ model: ## Pull the generation model into Ollama
 	$(COMPOSE) exec ollama ollama pull $${LLM_MODEL:-qwen3:8b}
 
 ingest: ## Index everything in CORPUS_DIR
-	$(COMPOSE) run --rm ingest /data
+	$(COMPOSE) run --rm --entrypoint python ingest ingest.py /data
 
 reindex: ## Re-parse and re-index everything
-	$(COMPOSE) run --rm ingest /data --reindex
+	$(COMPOSE) run --rm --entrypoint python ingest ingest.py /data --reindex
 
 health: ## Show component status
 	@curl -s localhost:8080/health | python3 -m json.tool

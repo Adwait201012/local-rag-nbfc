@@ -25,6 +25,8 @@ documents ──► Docling ──► chunks ──► bge-m3 ──┐
 
 Twenty questions with hand-verified answers, drawn from the indexed Master
 Directions. `eval/questions.jsonl` and `eval/evaluate.py` are in this repo.
+These are historical English results; rerun after changing OCR or evaluation
+labels. They have not been remeasured for this Hindi/Hinglish addition.
 
 | corpus | retrieval | recall@6 | MRR |
 |---|---|---|---|
@@ -41,7 +43,7 @@ system is 100% accurate. See *Open problems* below.
 
 | Layer | Choice | Licence |
 |---|---|---|
-| Parsing & chunking | Docling (HybridChunker), RapidOCR fallback | MIT |
+| Parsing & chunking | Docling (HybridChunker), Tesseract Hindi/English OCR | MIT / Apache-2.0 |
 | Embeddings | BAAI/bge-m3, 1024-dim, 100+ languages | MIT |
 | Store & retrieval | Postgres 17 + pgvector HNSW + tsvector, fused with RRF | PostgreSQL / MIT |
 | Reranking | BAAI/bge-reranker-v2-m3 cross-encoder | Apache-2.0 |
@@ -146,9 +148,10 @@ Known limitations, none of them solved:
   find text that was never extracted.
 - **No per-user isolation.** A single shared password, one document pool. Two
   users would see each other's files.
-- **OCR is Chinese/English-trained.** Fine on the RBI's digital PDFs, where it
-  barely fires. Untested and probably poor on scanned Devanagari, which is the
-  case that actually matters for Indian document work.
+- **Scanned Hindi quality is not yet measured.** Hindi/English Tesseract OCR is
+  configured, but the English retrieval results above do not establish Hindi or
+  Hinglish quality. Use the separate OCR and retrieval evaluations below with
+  real, manually labelled scans.
 
 ## Running it
 
@@ -189,5 +192,121 @@ Ingestion runs as a serial queue backed by the `jobs` table rather than in-proce
 background tasks. Parsing is CPU-bound, so concurrent jobs only thrash; and jobs
 that survive in the database can be resumed after a restart instead of being lost.
 
-RapidOCR downloads its weights to a mounted directory rather than into the
-container, so a rebuild does not force a re-download from a slow remote host.
+The ingestion image installs Tesseract's Hindi (`hin`) and English (`eng`) language
+packs. The legacy RapidOCR cache mount is retained but is not used by this OCR setup.
+
+## Hindi, Hinglish, and scanned circulars
+
+The existing bge-m3 embedder and multilingual reranker are retained. Questions go
+to them in their original language; no cloud translation service is added.
+Use Hindi (`इस परिपत्र की समय सीमा क्या है?`) or Hinglish
+(`Is circular ki deadline kya hai?`) in the existing input box. Select **हिन्दी**,
+**Hinglish**, **English**, or **Same as question** for the answer. Hinglish means
+Hindi in Latin script mixed with English; it is not a separate OCR language pack.
+Prompt instructions preserve citations, figures, dates, and identifiers.
+Romanized Hindi spelling varies, so retrieval quality must be checked on your data.
+The existing English full-text search remains; cross-script matching relies on
+the multilingual dense retriever and reranker, not transliteration-aware SQL.
+
+Both `/api/chat` and `/v1/chat/completions` accept an optional `language` field:
+`auto` (default), `hi`, `hinglish`, or `en`. The latter field is a custom extension
+to the OpenAI-compatible endpoint. Automatic empty-result messages detect Hindi
+script; select Hinglish explicitly to get a Hinglish empty-result message.
+Hindi filenames are preserved on upload.
+
+### Enable OCR and reindex
+
+From the repository root, rebuild the two changed services:
+
+```bash
+docker compose up -d --build api ingest
+docker compose run --rm --no-deps --entrypoint tesseract ingest --list-langs
+make reindex
+```
+
+The language list should include `hin` and `eng`. `make reindex` is necessary for
+already indexed scans: the original file hash has not changed, so normal ingestion
+would otherwise skip them. This reparses documents and recomputes their embeddings.
+Default `OCR_LANGUAGES=hin,eng` applies to PDF and image ingestion. Normal digital
+PDFs retain native text extraction. If a scan has a broken embedded text layer,
+set `OCR_FORCE_FULL_PAGE=true` in `.env`, recreate the ingest service, and reindex.
+Full-page OCR costs more CPU time; use the same setting during evaluation.
+
+### Measure scanned Hindi performance
+
+Use real scanned Hindi circulars with varied resolution, skew, tables, and mixed
+Hindi/English content. Keep tuning and held-out evaluation circulars separate.
+Keep the current English questions as a regression set. Templates below contain
+**no benchmark evidence or measured scores** and deliberately refuse to run until
+you replace their placeholders and remove `template:true`.
+
+**1. OCR extraction quality.** Put PDFs in `corpus/`. For each labelled page, type
+and manually verify its full text in reading order in a UTF-8 file under
+`eval/references/`. Include headers, footers, punctuation, and table content as
+represented in Docling's plain-text export; do not use the OCR output as ground truth.
+Copy `eval/ocr.hindi.example.jsonl` to `eval/ocr.hindi.jsonl` and fill in actual PDF
+paths, 1-based page numbers, and reference paths. Docker sees PDFs under `/data/`
+and the evaluation directory under `/eval/`; relative reference paths are resolved
+from the manifest directory.
+
+```bash
+docker compose run --rm --no-deps --entrypoint python ingest \
+  /eval/evaluate_ocr.py /eval/ocr.hindi.jsonl --output /eval/ocr-results.json
+```
+
+The script uses the same Docling/Tesseract converter as ingestion and reports:
+
+| Metric | Meaning |
+|---|---|
+| CER | Character edit distance / reference characters; lower is better |
+| WER | Word edit distance / reference words; lower is better |
+| Extraction seconds | Whole-document conversion time, including layout and OCR |
+
+CER is Unicode-code-point based after NFC normalization and whitespace collapse,
+not grapheme based. Hindi matras, nukta, digits, case, and punctuation are preserved.
+Corpus CER/WER use total errors divided by total reference length; rates can exceed
+1 when OCR inserts text. These measure Docling's extracted reading-order text, so
+layout/serialization errors also count. The report includes predictions per page
+for inspecting failures. Timings include first-use model loading; repeat warm runs
+separately and record hardware, software versions, scan quality, and OCR settings.
+
+**2. Retrieval quality in each language.** Copy
+`eval/questions.hindi.example.jsonl` to `eval/questions.hindi.jsonl`. Write equivalent
+English, Hindi, and Hinglish questions for each fact, labelled `en`, `hi`, and
+`hinglish`. Use verified Hindi evidence in `expect_text` or `expect_any`, plus the
+source filename. Optional `expect_page` matches the chunk's **starting page**; omit
+it for cross-page chunks whose start differs from the evidence page.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install httpx
+.venv/bin/python eval/evaluate.py eval/questions.hindi.jsonl --output eval/retrieval-results.json
+.venv/bin/python eval/evaluate.py eval/questions.jsonl --output eval/english-regression.json
+```
+
+Reports include recall@k (the fraction of questions with at least one relevant
+hit, also called hit@k), MRR, mean/p95 request latency, misses, and separate results
+for every language, with and without reranking. All supplied text/source/page
+constraints must hold in the same result. Old source-only labels still work but
+measure document retrieval, not answer evidence. Phrase matching can penalize
+OCR spelling errors; manually inspect misses against the scans before changing
+labels. Do not silently weaken ground truth to match broken OCR.
+
+**3. Answer quality.** Retrieval scores are not answer accuracy. Review generated
+answers separately for factual correctness against the scan, supported citations,
+correct numbers/dates, requested language/script, and abstention on unanswerable
+questions. No automatic answer-quality score is claimed by these scripts.
+
+No Hindi/Hinglish benchmark scores are published until real scans and checked
+labels have been run through the stack. Do not reuse the earlier English scores.
+
+### Focused checks
+
+```bash
+.venv/bin/pip install -r api/requirements.txt pytest
+.venv/bin/pytest -q
+```
+
+These checks exercise language handling and streaming with mocked retrieval/model
+responses, Unicode OCR metrics, and evaluation labels. They do not replace a live
+Docker/GPU run or measure OCR/model quality.

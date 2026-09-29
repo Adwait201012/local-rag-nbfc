@@ -1,7 +1,7 @@
 # Local RAG stack for a single 12 GB Blackwell GPU (RTX 5070).
 #
 #   docker compose up -d --build      start db + embeddings + ollama + api
-#   docker compose run --rm ingest    index whatever is in CORPUS_DIR
+#   make ingest                       index files in ./corpus
 #
 # GPU residency at steady state:
 #   ollama      qwen3:8b Q4_K_M          ~5.2 GB
@@ -107,19 +107,22 @@ services:
       ollama:
         condition: service_started
 
-  # One-shot worker, not a long-running service. Hence the profile:
-  # `docker compose up` will not start it.
+  # Serial ingestion queue. `make ingest` / `make reindex` override the worker
+  # entrypoint for a one-shot batch run.
   ingest:
     build: ./ingest
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-ragpass}@db:5432/${POSTGRES_DB:-rag}
       EMBED_URL: http://embeddings:8081
       MAX_TOKENS: ${CHUNK_MAX_TOKENS:-512}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-hin,eng}
+      OCR_FORCE_FULL_PAGE: ${OCR_FORCE_FULL_PAGE:-false}
       HF_HOME: /models
     volumes:
       - ./corpus:/data
       - ${HF_CACHE:-./models}:/models
       - ${OCR_CACHE:-./ocr-models}:/usr/local/lib/python3.12/site-packages/rapidocr/models
+      - ./eval:/eval
     depends_on:
       db:
         condition: service_healthy

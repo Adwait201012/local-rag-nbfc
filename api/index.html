@@ -39,6 +39,8 @@
   input[type=text]{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;
         color:var(--text);padding:12px 14px;font:15px var(--sans)}
   input[type=text]:focus{outline:2px solid var(--signal);outline-offset:1px}
+  #language{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+  .language-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:13px;color:var(--muted)}
   button.go{background:var(--signal);color:#0d1114;border:0;border-radius:6px;padding:0 20px;
          font:600 14px var(--sans);cursor:pointer}
   button.go:disabled{opacity:.45;cursor:progress}
@@ -72,8 +74,17 @@
   </div>
 
   <div id="mid">
+    <div class="language-row">
+      <label for="language">Answer language</label>
+      <select id="language">
+        <option value="auto">Same as question</option>
+        <option value="en">English</option>
+        <option value="hi">हिन्दी</option>
+        <option value="hinglish">Hinglish</option>
+      </select>
+    </div>
     <form id="ask">
-      <input type="text" id="q" placeholder="Ask anything about your documents" autocomplete="off" autofocus>
+      <input type="text" id="q" placeholder="Ask in English, हिन्दी, or Hinglish" autocomplete="off" autofocus>
       <button class="go" id="gobtn" type="submit">Ask</button>
     </form>
     <div id="answer" class="empty">
@@ -183,7 +194,8 @@ $('#ask').addEventListener('submit', async e => {
   $('#sources').className='empty'; $('#sources').textContent='searching…';
   try{
     const res = await fetch('/api/chat', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({query})});
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, language: $('#language').value})});
+    if(!res.ok) throw new Error(`Request failed (${res.status})`);
     const reader = res.body.getReader(); const dec = new TextDecoder();
     let buf='', event='';
     while(true){

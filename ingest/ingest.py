@@ -1,8 +1,8 @@
 """Ingestion worker: parse -> chunk -> embed -> store.
 
 Usage (from the repo root, stack already up):
-    docker compose run --rm ingest /data
-    docker compose run --rm ingest /data --reindex     # force re-parse everything
+    docker compose run --rm --entrypoint python ingest ingest.py /data
+    docker compose run --rm --entrypoint python ingest ingest.py /data --reindex
 
 Parsing uses Docling, which preserves layout, reading order, headings and tables
 instead of flattening the page. Chunking is Docling's HybridChunker, which splits
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import httpx
 import psycopg
+from ocr import convert_document
 from psycopg.types.json import Json  # noqa: F401  (kept for future metadata use)
 
 import re as _re
@@ -100,10 +101,7 @@ def split_enumerated(text: str, max_chars: int = 1500, min_piece: int = 250) -> 
 
 def docling_chunks(path: Path) -> list[dict]:
     from docling.chunking import HybridChunker
-    from docling.document_converter import DocumentConverter
-
-    converter = DocumentConverter()
-    doc = converter.convert(str(path)).document
+    doc = convert_document(path)
     chunker = HybridChunker(tokenizer="BAAI/bge-m3", max_tokens=MAX_TOKENS, merge_peers=True)
 
     chunks = []
