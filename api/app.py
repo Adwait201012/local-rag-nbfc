@@ -414,6 +414,20 @@ async def jobs() -> dict:
     return {"jobs": [dict(zip(keys, r)) for r in rows]}
 
 
+@app.delete("/api/jobs/{job_id}")
+async def dismiss_job(job_id: int) -> dict:
+    # Only finished or failed jobs can be dismissed. A queued or running job is
+    # still owned by the worker, and removing it would silently drop the file.
+    async with state["pool"].connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM jobs WHERE id=%s AND status IN ('error','done') "
+                              "RETURNING id", (job_id,))
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(409, "job is still running or does not exist")
+    return {"dismissed": job_id}
+
+
 @app.get("/api/documents")
 async def documents() -> dict:
     async with state["pool"].connection() as conn:

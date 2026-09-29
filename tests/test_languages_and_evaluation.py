@@ -159,3 +159,35 @@ def test_search_and_chat_pass_the_area_through(monkeypatch):
             await client.post("/api/chat", json={"query": "q", "area": "income_tax"})
     asyncio.run(run())
     assert seen == ["gst", None, "income_tax"]
+
+
+def test_only_finished_or_failed_jobs_can_be_dismissed(monkeypatch):
+    jobs = {1: "error", 2: "parsing"}
+
+    class Cur:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def execute(self, sql, args):
+            self.row = None
+            jid = args[0]
+            if jobs.get(jid) in ("error", "done"):
+                del jobs[jid]
+                self.row = (jid,)
+        async def fetchone(self): return self.row
+
+    class Conn:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        def cursor(self): return Cur()
+
+    class Pool:
+        def connection(self): return Conn()
+
+    async def run():
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        monkeypatch.setitem(api.state, "pool", Pool())
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+            assert (await client.delete("/api/jobs/1")).status_code == 200
+            assert (await client.delete("/api/jobs/2")).status_code == 409
+    asyncio.run(run())
+    assert jobs == {2: "parsing"}

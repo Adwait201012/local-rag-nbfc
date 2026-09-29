@@ -32,7 +32,9 @@
   .doc-meta{font:11px var(--mono);color:var(--muted);margin-top:2px}
   .del{background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:2px 4px}
   .del:hover{color:var(--bad)}
-  .job{font:11px var(--mono);padding:6px 0;border-top:1px solid var(--line);color:var(--muted)}
+  .job{font:11px var(--mono);padding:6px 0;border-top:1px solid var(--line);color:var(--muted);display:flex;gap:6px;align-items:flex-start}
+  .job span{flex:1;min-width:0;overflow-wrap:anywhere}
+  .job .del{font-size:13px;padding:0 2px}
   .job b{color:var(--text);font-weight:400}
   .job.parsing b{color:var(--warm)} .job.done b{color:var(--signal)} .job.error b{color:var(--bad)}
   form{display:flex;gap:8px}
@@ -146,12 +148,17 @@ async function refreshJobs(){
     window._seen = window._seen || {};
     jobs.forEach(j => { if(j.status === 'done' && !window._seen[j.id]) window._seen[j.id] = Date.now(); });
     $('#joblist').innerHTML = jobs.map(j => `<div class="job ${j.status}">
-      ${esc(j.filename)} — <b>${j.status === 'parsing' ? 'reading…' : esc(j.message || j.status)}</b>
+      <span>${esc(j.filename)} — <b>${j.status === 'parsing' ? 'reading…' : esc(j.message || j.status)}</b></span>
+      ${j.status === 'error' ? `<button class="del" title="Dismiss" onclick="dismissJob(${j.id})">&times;</button>` : ''}
     </div>`).join('');
     const busy = jobs.some(j => j.status === 'queued' || j.status === 'parsing');
     if(busy && !polling){ polling = true; }
     if(!busy && polling){ polling = false; refreshDocs(); refreshStats(); refreshAreas(); }
   }catch{}
+}
+async function dismissJob(id){
+  await fetch('/api/jobs/' + id, {method:'DELETE'});
+  refreshJobs();
 }
 setInterval(refreshJobs, 2000);
 
