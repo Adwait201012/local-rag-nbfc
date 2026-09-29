@@ -52,6 +52,27 @@ Rules:
 - Preserve the original numbers, dates, regulation identifiers, and [n] citations in every language.
 - Be concise. No preamble."""
 
+# v2 replaces the final "Be concise" rule. Compliance answers are judged on what
+# they leave out: an answer that states the general rule but drops an exception
+# is wrong in practice even when every sentence in it is true. So v2 asks for
+# every condition and exception the passages give, kept short point by point.
+COMPLETENESS_RULES = """- Start with the direct answer in one sentence.
+- Then state every condition, exception, limit, threshold and carve-out that the
+  passages give on this question, including ones that seem minor. When a rule has
+  numbered sub-clauses, provisos or exceptions, cover each one. Never drop one to
+  make the answer shorter.
+- When the passages treat different cases differently (types of company, deposit,
+  customer, amount), cover each case separately.
+- Keep each point short. No preamble, and nothing the passages do not support."""
+
+PROMPTS = {
+    "v1": SYSTEM_PROMPT,
+    "v2": SYSTEM_PROMPT.replace("- Be concise. No preamble.", COMPLETENESS_RULES),
+}
+assert PROMPTS["v2"] != PROMPTS["v1"], "v2 rule replacement failed"
+PromptVersion = Literal["v1", "v2"]
+DEFAULT_PROMPT = os.getenv("PROMPT_VERSION", "v1")
+
 ResponseLanguage = Literal["auto", "en", "hi", "hinglish"]
 LANGUAGE_RULES = {
     "auto": "Follow the question's language and script.",
@@ -61,10 +82,13 @@ LANGUAGE_RULES = {
 }
 
 
-def answer_prompt(language: str = "auto") -> str:
+def answer_prompt(language: str = "auto", version: str | None = None) -> str:
     if not isinstance(language, str) or language not in LANGUAGE_RULES:
         raise HTTPException(422, "language must be auto, en, hi, or hinglish")
-    return SYSTEM_PROMPT + "\nResponse language: " + LANGUAGE_RULES[language]
+    version = version or DEFAULT_PROMPT
+    if version not in PROMPTS:
+        raise HTTPException(422, "prompt_version must be v1 or v2")
+    return PROMPTS[version] + "\nResponse language: " + LANGUAGE_RULES[language]
 
 
 def no_match(query: str, language: str) -> str:
@@ -106,6 +130,7 @@ class ChatRequest(BaseModel):
     temperature: float = 0.2
     language: ResponseLanguage = "auto"
     area: str | None = None
+    prompt_version: PromptVersion | None = None
 
 
 # ---------------------------------------------------------------- retrieval
@@ -196,7 +221,8 @@ async def ollama_chat(messages: list[dict], temperature: float, stream: bool):
     return r.json()["message"]["content"]
 
 
-async def stream_answer(query: str, passages: list[dict], temperature: float, language: str = "auto") -> AsyncIterator[str]:
+async def stream_answer(query: str, passages: list[dict], temperature: float, language: str = "auto",
+                        prompt_version: str | None = None) -> AsyncIterator[str]:
     yield f"event: sources\ndata: {json.dumps([{k: v for k, v in p.items() if k != 'text'} for p in passages])}\n\n"
 
     if not passages:
@@ -205,7 +231,7 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
         return
 
     messages = [
-        {"role": "system", "content": answer_prompt(language)},
+        {"role": "system", "content": answer_prompt(language, prompt_version)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
     ]
     payload = await ollama_chat(messages, temperature, stream=True)
@@ -324,7 +350,7 @@ async def api_search(req: SearchRequest) -> dict:
 async def api_chat(req: ChatRequest) -> StreamingResponse:
     passages = await retrieve(req.query, req.top_k, area=req.area)
     return StreamingResponse(
-        stream_answer(req.query, passages, req.temperature, req.language),
+        stream_answer(req.query, passages, req.temperature, req.language, req.prompt_version),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

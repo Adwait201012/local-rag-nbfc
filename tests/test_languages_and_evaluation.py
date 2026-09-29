@@ -191,3 +191,38 @@ def test_only_finished_or_failed_jobs_can_be_dismissed(monkeypatch):
             assert (await client.delete("/api/jobs/2")).status_code == 409
     asyncio.run(run())
     assert jobs == {2: "parsing"}
+
+
+# ---------------------------------------------------------------- prompt versions
+
+def test_v2_replaces_only_the_concise_rule():
+    v1, v2 = api.answer_prompt("auto", "v1"), api.answer_prompt("auto", "v2")
+    assert "Be concise" in v1 and "Be concise" not in v2
+    assert "Never drop one" in v2
+    for shared in ("Cite them inline", "do not guess", "Preserve the original numbers"):
+        assert shared in v1 and shared in v2
+
+
+def test_chat_uses_the_requested_prompt_version(monkeypatch):
+    seen = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            seen.append(json.loads(request.content)["messages"][0]["content"])
+            return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                await client.post("/api/chat", json={"query": "q", "prompt_version": "v2"})
+                await client.post("/api/chat", json={"query": "q"})
+                bad = await client.post("/api/chat", json={"query": "q", "prompt_version": "v9"})
+                assert bad.status_code == 422
+    asyncio.run(run())
+    assert "Never drop one" in seen[0]
+    assert "Be concise" in seen[1]

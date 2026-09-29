@@ -51,11 +51,12 @@ def login(client: httpx.Client, base: str, password: str | None) -> None:
     print("[auth] signed in")
 
 
-def ask(client: httpx.Client, base: str, question: str, area: str | None = None) -> tuple[str, list[dict]]:
+def ask(client: httpx.Client, base: str, question: str, area: str | None = None,
+        prompt: str | None = None) -> tuple[str, list[dict]]:
     """Stream one answer out of /api/chat, collecting text and cited sources."""
     answer, sources = [], []
     with client.stream("POST", f"{base}/api/chat",
-                       json={"query": question, "area": area}, timeout=300) as resp:
+                       json={"query": question, "area": area, "prompt_version": prompt}, timeout=300) as resp:
         resp.raise_for_status()
         event = ""
         for line in resp.iter_lines():
@@ -83,6 +84,33 @@ def key_facts(text: str) -> list[str]:
     return list(dict.fromkeys(out))[:6]
 
 
+_UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+          "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+          "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+_WORD = "|".join(sorted(list(_UNITS) + list(_TENS), key=len, reverse=True))
+
+
+def words_to_digits(text: str) -> str:
+    """'one and one-half' -> '1.5', 'sixty months' -> '60 months', 'five per cent' -> '5 per cent'.
+
+    The model writes figures as words as often as digits, and an answer that says
+    "one and one-half times" is exactly as correct as "1.5 times".
+    """
+    def num(w):
+        w = w.lower().replace("-", " ").split()
+        return sum(_TENS.get(x, 0) + _UNITS.get(x, 0) for x in w)
+
+    t = re.sub(rf"\b({_WORD})(?:[ -]({_WORD}))?\s+and\s+(?:a|one)[ -]half\b",
+               lambda m: f"{num(m.group(0).split(' and ')[0])}.5", text, flags=re.I)
+    t = re.sub(rf"\b({'|'.join(_TENS)})[ -]({'|'.join(k for k in _UNITS if _UNITS[k] < 10)})\b",
+               lambda m: str(num(m.group(0))), t, flags=re.I)
+    t = re.sub(rf"\b({_WORD})\b", lambda m: str(num(m.group(0))), t, flags=re.I)
+    return t
+
+
 def looks_like_refusal(answer: str) -> bool:
     low = answer.lower()
     return any(m in low for m in REFUSAL_MARKERS)
@@ -105,7 +133,7 @@ def assess(row, answer: str, sources: list[dict]) -> tuple[str, str]:
     if not wanted:
         return "CHECK", "no numeric facts to compare - read the answer yourself"
 
-    norm = answer.lower().replace(",", "").replace("₹", "").replace(" ", "")
+    norm = words_to_digits(answer).lower().replace(",", "").replace("₹", "").replace(" ", "")
     norm = norm.replace("percent", "%").replace("per cent", "%")
     hit = [f for f in wanted if f in norm]
     if len(hit) == len(wanted):
@@ -123,6 +151,8 @@ def main() -> int:
     ap.add_argument("--password", default=None)
     ap.add_argument("--limit", type=int, default=None, help="run only the first N rows")
     ap.add_argument("--area", default=None, help="search only this area, e.g. gst (default: all)")
+    ap.add_argument("--prompt", choices=["v1", "v2"], default=None,
+                    help="answering instructions to use; results file gets this suffix")
     args = ap.parse_args()
 
     df = pd.read_excel(args.sheet)
@@ -139,7 +169,7 @@ def main() -> int:
             q = str(row["question"])
             t0 = time.time()
             try:
-                answer, sources = ask(client, args.api, q, args.area)
+                answer, sources = ask(client, args.api, q, args.area, args.prompt)
                 flag, note = assess(row, answer, sources)
             except Exception as exc:
                 answer, sources = "", []
@@ -180,7 +210,8 @@ def main() -> int:
     order = [c for c in df.columns if c not in manual]
     df = df[order + manual]
 
-    out = args.sheet.rsplit(".", 1)[0] + "_results.xlsx"
+    suffix = f"_results_{args.prompt}" if args.prompt else "_results"
+    out = args.sheet.rsplit(".", 1)[0] + suffix + ".xlsx"
     df.to_excel(out, index=False)
 
     print("\n" + "-" * 60)
