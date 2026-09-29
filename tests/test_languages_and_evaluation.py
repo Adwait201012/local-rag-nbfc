@@ -226,3 +226,9 @@ def test_chat_uses_the_requested_prompt_version(monkeypatch):
     asyncio.run(run())
     assert "Never drop one" in seen[0]
     assert "Be concise" in seen[1]
+
+
+def test_v2_does_not_open_unanswerable_questions_with_yes_or_no():
+    v2 = api.answer_prompt("auto", "v2")
+    assert "say so in the first sentence" in v2
+    assert 'Never\n  open with "yes" or "no"' in v2

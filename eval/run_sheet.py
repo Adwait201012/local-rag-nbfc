@@ -111,8 +111,14 @@ def words_to_digits(text: str) -> str:
     return t
 
 
+REFUSAL_WINDOW = 220
+
+
 def looks_like_refusal(answer: str) -> bool:
-    low = answer.lower()
+    """A refusal says so up front. Longer answers often add, near the end, that the
+    passages do not cover some side point; judging the whole text turned every such
+    note into a false "declined to answer", so only the opening counts."""
+    low = answer.lower()[:REFUSAL_WINDOW]
     return any(m in low for m in REFUSAL_MARKERS)
 
 

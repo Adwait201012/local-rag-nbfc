@@ -56,7 +56,9 @@ Rules:
 # they leave out: an answer that states the general rule but drops an exception
 # is wrong in practice even when every sentence in it is true. So v2 asks for
 # every condition and exception the passages give, kept short point by point.
-COMPLETENESS_RULES = """- Start with the direct answer in one sentence.
+COMPLETENESS_RULES = """- If the passages answer the question, start with the direct answer in one sentence.
+- If they do not answer it, say so in the first sentence, before anything else. Never
+  open with "yes" or "no" unless the passages directly settle that exact question.
 - Then state every condition, exception, limit, threshold and carve-out that the
   passages give on this question, including ones that seem minor. When a rule has
   numbered sub-clauses, provisos or exceptions, cover each one. Never drop one to
