@@ -115,7 +115,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-ragpass}@db:5432/${POSTGRES_DB:-rag}
       EMBED_URL: http://embeddings:8081
       MAX_TOKENS: ${CHUNK_MAX_TOKENS:-512}
-      OCR_LANGUAGES: ${OCR_LANGUAGES:-hin,eng}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng,hin}
       OCR_FORCE_FULL_PAGE: ${OCR_FORCE_FULL_PAGE:-false}
       HF_HOME: /models
     volumes:
