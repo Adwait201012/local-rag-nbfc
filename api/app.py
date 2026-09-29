@@ -24,7 +24,7 @@ import httpx
 import re
 import shutil
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (HTMLResponse, JSONResponse,
                                RedirectResponse, StreamingResponse)
 from psycopg_pool import AsyncConnectionPool
@@ -97,6 +97,7 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=TOP_K_FINAL, ge=1, le=50)
     rerank: bool = True
+    area: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -104,6 +105,7 @@ class ChatRequest(BaseModel):
     top_k: int = Field(default=TOP_K_FINAL, ge=1, le=20)
     temperature: float = 0.2
     language: ResponseLanguage = "auto"
+    area: str | None = None
 
 
 # ---------------------------------------------------------------- retrieval
@@ -122,25 +124,37 @@ async def rerank(query: str, docs: list[str], top_k: int) -> list[dict]:
     return r.json()["results"]
 
 
-async def _candidates(q: str) -> list[dict]:
+DEFAULT_AREA = os.getenv("DEFAULT_AREA", "rbi")
+AREA_NAME = re.compile(r"[^a-z0-9_]+")
+
+
+def clean_area(area: str | None) -> str | None:
+    """None, "" and "all" mean every area. Anything else becomes a safe folder name."""
+    if not area or area.strip().lower() == "all":
+        return None
+    return AREA_NAME.sub("_", area.strip().lower()).strip("_") or None
+
+
+async def _candidates(q: str, area: str | None = None) -> list[dict]:
     vec = await embed_query(q)
     async with state["pool"].connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT chunk_id, doc_id, source, heading, page, text, score "
-                "FROM hybrid_search(%s::vector, %s, %s)",
-                (str(vec), q, TOP_K_CANDIDATES),
+                "FROM hybrid_search(%s::vector, %s, %s, 60, %s::text)",
+                (str(vec), q, TOP_K_CANDIDATES, clean_area(area)),
             )
             rows = await cur.fetchall()
     return [{"chunk_id": r[0], "doc_id": r[1], "source": r[2], "heading": r[3],
              "page": r[4], "text": r[5], "fusion_score": float(r[6])} for r in rows]
 
 
-async def retrieve(query: str, top_k: int, use_rerank: bool = True) -> list[dict]:
+async def retrieve(query: str, top_k: int, use_rerank: bool = True,
+                   area: str | None = None) -> list[dict]:
     # The question is used exactly as typed. Layer abbreviations are normalised
     # in the documents at index time instead (see ingest.normalize_layers), because
     # every attempt to patch the question helped one kind of page and hurt another.
-    cands = await _candidates(query)
+    cands = await _candidates(query, area)
     if not cands:
         return []
     if not use_rerank:
@@ -302,13 +316,13 @@ async def health() -> dict:
 @app.post("/api/search")
 async def api_search(req: SearchRequest) -> dict:
     t0 = time.time()
-    results = await retrieve(req.query, req.top_k, req.rerank)
+    results = await retrieve(req.query, req.top_k, req.rerank, req.area)
     return {"query": req.query, "took_ms": int((time.time() - t0) * 1000), "results": results}
 
 
 @app.post("/api/chat")
 async def api_chat(req: ChatRequest) -> StreamingResponse:
-    passages = await retrieve(req.query, req.top_k)
+    passages = await retrieve(req.query, req.top_k, area=req.area)
     return StreamingResponse(
         stream_answer(req.query, passages, req.temperature, req.language),
         media_type="text/event-stream",
@@ -361,16 +375,32 @@ SAFE_NAME = re.compile(r"[^A-Za-z0-9\u0900-\u097f._ -]")
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)) -> dict:
+async def upload(file: UploadFile = File(...), area: str = Form(DEFAULT_AREA)) -> dict:
     name = SAFE_NAME.sub("_", os.path.basename(file.filename or "upload"))
-    with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
+    area = clean_area(area) or DEFAULT_AREA
+    # Default-area files stay in the corpus root, where the existing library
+    # already lives; every other area gets its own folder.
+    rel = name if area == DEFAULT_AREA else f"{area}/{name}"
+    os.makedirs(os.path.dirname(os.path.join(UPLOAD_DIR, rel)), exist_ok=True)
+    with open(os.path.join(UPLOAD_DIR, rel), "wb") as fh:
         shutil.copyfileobj(file.file, fh)
     try:
         r = await state["http"].post(f"{INGEST_URL}/ingest",
-                                     json={"filename": name}, timeout=30)
-        return {"filename": name, **r.json()}
+                                     json={"filename": rel}, timeout=30)
+        return {"filename": rel, "area": area, **r.json()}
     except Exception as exc:
-        return {"filename": name, "error": f"saved, but indexing failed: {exc}"}
+        return {"filename": rel, "area": area, "error": f"saved, but indexing failed: {exc}"}
+
+
+@app.get("/api/areas")
+async def areas() -> dict:
+    async with state["pool"].connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT area, count(*), coalesce(sum(n_chunks), 0) "
+                              "FROM documents GROUP BY area ORDER BY area")
+            rows = await cur.fetchall()
+    return {"default": DEFAULT_AREA,
+            "areas": [{"area": r[0], "documents": r[1], "passages": r[2]} for r in rows]}
 
 
 @app.get("/api/jobs")
@@ -388,11 +418,12 @@ async def jobs() -> dict:
 async def documents() -> dict:
     async with state["pool"].connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT id, source_path, n_chunks, ingested_at "
+            await cur.execute("SELECT id, source_path, n_chunks, ingested_at, area "
                               "FROM documents ORDER BY id DESC")
             rows = await cur.fetchall()
     return {"documents": [{"id": r[0], "name": os.path.basename(r[1]),
-                           "chunks": r[2], "added": r[3].strftime("%d %b %H:%M")}
+                           "chunks": r[2], "added": r[3].strftime("%d %b %H:%M"),
+                           "area": r[4]}
                           for r in rows]}
 
 

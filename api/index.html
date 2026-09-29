@@ -39,7 +39,9 @@
   input[type=text]{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;
         color:var(--text);padding:12px 14px;font:15px var(--sans)}
   input[type=text]:focus{outline:2px solid var(--signal);outline-offset:1px}
-  #language{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+  #language,#area,#upArea{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+  #upArea{width:100%;margin-bottom:8px}
+  .area-tag{font:10px var(--mono);color:var(--signal);text-transform:uppercase;letter-spacing:.06em}
   .language-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:13px;color:var(--muted)}
   button.go{background:var(--signal);color:#0d1114;border:0;border-radius:6px;padding:0 20px;
          font:600 14px var(--sans);cursor:pointer}
@@ -66,6 +68,7 @@
 <main>
   <div id="docs">
     <h2>Your documents</h2>
+    <select id="upArea" title="Area for new uploads"></select>
     <div id="drop">Drop files here<br>or click to choose</div>
     <input type="file" id="picker" multiple hidden
            accept=".pdf,.docx,.pptx,.xlsx,.html,.md,.txt,.png,.jpg,.jpeg">
@@ -75,6 +78,8 @@
 
   <div id="mid">
     <div class="language-row">
+      <label for="area">Search in</label>
+      <select id="area"><option value="all">All areas</option></select>
       <label for="language">Answer language</label>
       <select id="language">
         <option value="auto">Same as question</option>
@@ -120,7 +125,7 @@ async function refreshDocs(){
     box.innerHTML = d.map(x => `<div class="doc">
       <div class="doc-main">
         <div class="doc-name">${esc(x.name)}</div>
-        <div class="doc-meta">${x.chunks} passages · ${esc(x.added)}</div>
+        <div class="doc-meta"><span class="area-tag">${esc(x.area || '')}</span> · ${x.chunks} passages · ${esc(x.added)}</div>
       </div>
       <button class="del" title="Remove" onclick="removeDoc(${x.id})">&times;</button>
     </div>`).join('');
@@ -145,14 +150,14 @@ async function refreshJobs(){
     </div>`).join('');
     const busy = jobs.some(j => j.status === 'queued' || j.status === 'parsing');
     if(busy && !polling){ polling = true; }
-    if(!busy && polling){ polling = false; refreshDocs(); refreshStats(); }
+    if(!busy && polling){ polling = false; refreshDocs(); refreshStats(); refreshAreas(); }
   }catch{}
 }
 setInterval(refreshJobs, 2000);
 
 async function send(files){
   for(const f of files){
-    const fd = new FormData(); fd.append('file', f);
+    const fd = new FormData(); fd.append('file', f); fd.append('area', $('#upArea').value);
     await fetch('/api/upload', {method:'POST', body: fd});
   }
   refreshJobs();
@@ -194,7 +199,7 @@ $('#ask').addEventListener('submit', async e => {
   $('#sources').className='empty'; $('#sources').textContent='searching…';
   try{
     const res = await fetch('/api/chat', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, language: $('#language').value})});
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, language: $('#language').value, area: $('#area').value})});
     if(!res.ok) throw new Error(`Request failed (${res.status})`);
     const reader = res.body.getReader(); const dec = new TextDecoder();
     let buf='', event='';
@@ -218,7 +223,34 @@ $('#ask').addEventListener('submit', async e => {
   }finally{ $('#gobtn').disabled = false; }
 });
 
-refreshStats(); refreshDocs(); refreshJobs();
+async function refreshAreas(){
+  try{
+    const r = await (await fetch('/api/areas')).json();
+    const names = r.areas.map(a => a.area);
+    if(!names.includes(r.default)) names.unshift(r.default);
+    const keepSearch = $('#area').value, keepUp = $('#upArea').value;
+    $('#area').innerHTML = '<option value="all">All areas</option>' +
+      r.areas.map(a => `<option value="${esc(a.area)}">${esc(a.area)} (${a.documents})</option>`).join('');
+    $('#upArea').innerHTML = names.map(n => `<option value="${esc(n)}">Upload to: ${esc(n)}</option>`).join('') +
+      '<option value="__new">+ New area…</option>';
+    if([...$('#area').options].some(o => o.value === keepSearch)) $('#area').value = keepSearch;
+    if(keepUp && keepUp !== '__new' && names.includes(keepUp)) $('#upArea').value = keepUp;
+    else $('#upArea').value = r.default;
+  }catch{}
+}
+
+$('#upArea').addEventListener('change', () => {
+  if($('#upArea').value !== '__new') return;
+  const name = (prompt('New area name (e.g. gst, income_tax, companies_act):') || '')
+    .trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if(!name){ refreshAreas(); return; }
+  const opt = document.createElement('option');
+  opt.value = name; opt.textContent = 'Upload to: ' + name;
+  $('#upArea').insertBefore(opt, $('#upArea').lastElementChild);
+  $('#upArea').value = name;
+});
+
+refreshStats(); refreshDocs(); refreshJobs(); refreshAreas();
 </script>
 </body>
 </html>

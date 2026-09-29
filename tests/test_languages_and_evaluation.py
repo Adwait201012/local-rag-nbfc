@@ -81,7 +81,7 @@ def test_language_metrics_use_each_questions_first_relevant_rank(monkeypatch):
 ])
 def test_chat_preserves_query_citations_and_response_language(monkeypatch, language, query, rule):
     async def run():
-        async def retrieve(q, top_k, use_rerank=True):
+        async def retrieve(q, top_k, use_rerank=True, area=None):
             assert q == query
             return [{"source": "/data/परिपत्र.pdf", "page": 1, "text": "तीस दिन"}]
 
@@ -129,3 +129,33 @@ def test_empty_retrieval_does_not_call_model_and_language_is_validated(monkeypat
 def test_hindi_filenames_remain_distinct():
     assert api.SAFE_NAME.sub("_", "परिपत्र.pdf") == "परिपत्र.pdf"
     assert api.SAFE_NAME.sub("_", "नियम.pdf") != api.SAFE_NAME.sub("_", "ऋण.pdf")
+
+
+# ---------------------------------------------------------------- areas
+
+def test_area_names_are_cleaned_and_cannot_escape_the_corpus():
+    assert api.clean_area(None) is None
+    assert api.clean_area("") is None
+    assert api.clean_area("all") is None
+    assert api.clean_area("Income Tax") == "income_tax"
+    assert api.clean_area("companies-act") == "companies_act"
+    assert api.clean_area("../../etc") == "etc"
+    assert api.clean_area("../") is None
+
+
+def test_search_and_chat_pass_the_area_through(monkeypatch):
+    seen = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            seen.append(area)
+            return []
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+            await client.post("/api/search", json={"query": "q", "area": "gst"})
+            await client.post("/api/search", json={"query": "q"})
+            await client.post("/api/chat", json={"query": "q", "area": "income_tax"})
+    asyncio.run(run())
+    assert seen == ["gst", None, "income_tax"]

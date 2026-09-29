@@ -39,6 +39,19 @@ def normalize_layers(text: str) -> str:
     return LAYER_ABBR.sub(lambda m: f"{m.group(1)} ({LAYER_NAMES[m.group(2)]})", text)
 
 
+DATA_ROOT = Path(os.getenv("DATA_DIR", "/data"))
+DEFAULT_AREA = os.getenv("DEFAULT_AREA", "rbi")
+
+
+def area_for(path: Path) -> str:
+    """corpus/gst/x.pdf -> 'gst'. Files directly in the corpus root -> default area."""
+    try:
+        rel = Path(path).resolve().relative_to(DATA_ROOT.resolve())
+    except ValueError:
+        return DEFAULT_AREA
+    return rel.parts[0].lower() if len(rel.parts) > 1 else DEFAULT_AREA
+
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 EMBED_URL = os.getenv("EMBED_URL", "http://embeddings:8081")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
@@ -173,9 +186,9 @@ def ingest_file(conn: psycopg.Connection, client: httpx.Client, path: Path, rein
     with conn.cursor() as cur:
         cur.execute("DELETE FROM documents WHERE source_path = %s", (str(path),))
         cur.execute(
-            "INSERT INTO documents (source_path, title, sha256, n_chunks) "
-            "VALUES (%s, %s, %s, %s) RETURNING id",
-            (str(path), path.stem, digest, len(chunks)),
+            "INSERT INTO documents (source_path, title, sha256, n_chunks, area) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (str(path), path.stem, digest, len(chunks), area_for(path)),
         )
         doc_id = cur.fetchone()[0]
         cur.executemany(

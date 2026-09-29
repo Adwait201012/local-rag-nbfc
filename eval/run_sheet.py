@@ -51,11 +51,11 @@ def login(client: httpx.Client, base: str, password: str | None) -> None:
     print("[auth] signed in")
 
 
-def ask(client: httpx.Client, base: str, question: str) -> tuple[str, list[dict]]:
+def ask(client: httpx.Client, base: str, question: str, area: str | None = None) -> tuple[str, list[dict]]:
     """Stream one answer out of /api/chat, collecting text and cited sources."""
     answer, sources = [], []
     with client.stream("POST", f"{base}/api/chat",
-                       json={"query": question}, timeout=300) as resp:
+                       json={"query": question, "area": area}, timeout=300) as resp:
         resp.raise_for_status()
         event = ""
         for line in resp.iter_lines():
@@ -122,6 +122,7 @@ def main() -> int:
     ap.add_argument("--api", default="http://localhost:8080")
     ap.add_argument("--password", default=None)
     ap.add_argument("--limit", type=int, default=None, help="run only the first N rows")
+    ap.add_argument("--area", default=None, help="search only this area, e.g. gst (default: all)")
     args = ap.parse_args()
 
     df = pd.read_excel(args.sheet)
@@ -138,7 +139,7 @@ def main() -> int:
             q = str(row["question"])
             t0 = time.time()
             try:
-                answer, sources = ask(client, args.api, q)
+                answer, sources = ask(client, args.api, q, args.area)
                 flag, note = assess(row, answer, sources)
             except Exception as exc:
                 answer, sources = "", []
