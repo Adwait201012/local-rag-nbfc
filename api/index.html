@@ -48,6 +48,11 @@
   button.go{background:var(--signal);color:#0d1114;border:0;border-radius:6px;padding:0 20px;
          font:600 14px var(--sans);cursor:pointer}
   button.go:disabled{opacity:.45;cursor:progress}
+  #status{margin-top:24px;font:13px var(--mono);color:var(--muted);display:none;align-items:center;gap:10px}
+  #status.on{display:flex}
+  #status .dot{width:8px;height:8px;border-radius:50%;background:var(--signal);animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+  @media (prefers-reduced-motion: reduce){#status .dot{animation:none}}
   #answer{margin-top:24px;white-space:pre-wrap;font-size:15.5px;max-width:70ch}
   #answer cite{font-style:normal;color:var(--signal);font-family:var(--mono);font-size:.9em}
   .empty{color:var(--muted);font-size:13px}
@@ -94,6 +99,7 @@
       <input type="text" id="q" placeholder="Ask in English, हिन्दी, or Hinglish" autocomplete="off" autofocus>
       <button class="go" id="gobtn" type="submit">Ask</button>
     </form>
+    <div id="status" role="status" aria-live="polite"><span class="dot"></span><span id="statusText"></span><span id="statusTime"></span></div>
     <div id="answer" class="empty">
       Answers come only from documents you have added. Nothing is sent anywhere —
       this runs entirely on this machine.
@@ -204,6 +210,7 @@ $('#ask').addEventListener('submit', async e => {
   const out = $('#answer');
   out.className=''; out.textContent='';
   $('#sources').className='empty'; $('#sources').textContent='searching…';
+  showStatus('Searching your documents…');
   try{
     const res = await fetch('/api/chat', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, language: $('#language').value, area: $('#area').value})});
@@ -218,8 +225,13 @@ $('#ask').addEventListener('submit', async e => {
         if(line.startsWith('event: ')) event = line.slice(7).trim();
         else if(line.startsWith('data: ')){
           const data = JSON.parse(line.slice(6));
-          if(event === 'sources') renderSources(data);
-          if(event === 'token') out.textContent += data;
+          if(event === 'sources'){
+            renderSources(data);
+            if(data.length) showStatus(`Reading ${data.length} passage${data.length === 1 ? '' : 's'}…`);
+          }
+          if(event === 'status' && data === 'thinking' && !out.textContent)
+            showStatus('Reasoning over the passages…');
+          if(event === 'token'){ hideStatus(); out.textContent += data; }
         }
       }
     }
@@ -227,8 +239,29 @@ $('#ask').addEventListener('submit', async e => {
   }catch(err){
     out.className='empty';
     out.textContent = 'Something went wrong: ' + err.message;
-  }finally{ $('#gobtn').disabled = false; }
+  }finally{ hideStatus(); $('#gobtn').disabled = false; }
 });
+
+// One status line for the whole wait: what stage the answer is at, and how long
+// it has been going. The clock keeps running across stages, because the wait
+// that matters to the person is the total, not each step.
+let statusTimer = null, statusStart = 0;
+function showStatus(text){
+  $('#statusText').textContent = text;
+  if(!statusTimer){
+    statusStart = Date.now();
+    $('#statusTime').textContent = '';
+    statusTimer = setInterval(() => {
+      const s = Math.round((Date.now() - statusStart) / 1000);
+      $('#statusTime').textContent = s >= 2 ? `${s}s` : '';
+    }, 500);
+  }
+  $('#status').classList.add('on');
+}
+function hideStatus(){
+  clearInterval(statusTimer); statusTimer = null;
+  $('#status').classList.remove('on');
+}
 
 async function refreshAreas(){
   try{

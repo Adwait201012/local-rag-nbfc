@@ -280,3 +280,32 @@ def test_answer_cut_by_length_limit_says_so(monkeypatch):
                 assert "partial answer" in tokens
                 assert any("cut short" in str(t) for t in tokens)
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------- thinking status
+
+def test_stream_announces_thinking_once_before_the_answer(monkeypatch):
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            lines = [{"message": {"thinking": "Let me check", "content": ""}, "done": False},
+                     {"message": {"thinking": " the passages", "content": ""}, "done": False},
+                     {"message": {"content": "The answer"}, "done": False},
+                     {"message": {"content": " is 15%."}, "done": True, "done_reason": "stop"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json={"query": "q"})
+        events = [l[7:] for l in r.text.splitlines() if l.startswith("event: ")]
+        return events, r.text
+    events, text = asyncio.run(run())
+    assert events.count("status") == 1
+    assert events.index("status") < events.index("token")
+    assert events[0] == "sources" and events[-1] == "done"
+    assert "Let me check" not in text          # the reasoning itself is never shown

@@ -256,11 +256,18 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
     payload = await ollama_chat(messages, temperature, stream=True, think=think)
     async with state["http"].stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
         resp.raise_for_status()
+        announced = False
         async for line in resp.aiter_lines():
             if not line.strip():
                 continue
             chunk = json.loads(line)
-            piece = chunk.get("message", {}).get("content", "")
+            message = chunk.get("message", {})
+            # The model's hidden reasoning streams first, with no answer text.
+            # Tell the page once, so the wait reads as work rather than a hang.
+            if message.get("thinking") and not announced:
+                announced = True
+                yield f"event: status\ndata: {json.dumps('thinking')}\n\n"
+            piece = message.get("content", "")
             if piece:
                 yield f"event: token\ndata: {json.dumps(piece)}\n\n"
             if chunk.get("done"):
