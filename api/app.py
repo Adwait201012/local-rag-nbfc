@@ -326,13 +326,32 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
 
     asked_in = resolve_language(query, language)
     written_in = answer_language(query, language)
-    # Held back until the answer's first words, so the page keeps showing its
-    # "Reasoning..." status while the model thinks instead of clearing it early.
-    pending_note = ENGLISH_ON_PURPOSE[asked_in] if written_in == "en" and asked_in in ENGLISH_ON_PURPOSE else ""
+    english_on_purpose = written_in == "en" and asked_in in ENGLISH_ON_PURPOSE
+    question = f"Question: {query}"
+    if english_on_purpose:
+        # The system-prompt instruction alone was ignored in testing: with a Hindi
+        # question right in front of it, the model answered in Hindi. Repeating
+        # the instruction last, beside the question, is what it weighs most.
+        name = {"hi": "Hindi", "hinglish": "Hinglish"}[asked_in]
+        question += f"\n\nWrite the answer in English only, even though the question is in {name}."
     messages = [
         {"role": "system", "content": answer_prompt(written_in, prompt_version)},
-        {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
+        {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\n{question}"},
     ]
+
+    # Which note to show is decided from the answer's opening words, never from
+    # what was asked for. If the model writes Hindi or Hinglish anyway, an
+    # "answered in English" note would be false, so it is dropped and the
+    # translation warning is added at the end instead. The opening is held back
+    # briefly to decide; the page keeps its "Reasoning..." status meanwhile.
+    held, decided, drifted = "", not english_on_purpose, None
+
+    def open_answer():
+        lang = detect_language(held)
+        if lang in VERIFY_TRANSLATION:
+            return [held], lang
+        return [ENGLISH_ON_PURPOSE[asked_in], held], None
+
     payload = await ollama_chat(messages, temperature, stream=True, think=think)
     async with state["http"].stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
         resp.raise_for_status()
@@ -349,18 +368,29 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
                 yield f"event: status\ndata: {json.dumps('thinking')}\n\n"
             piece = message.get("content", "")
             if piece:
-                if pending_note:
-                    yield f"event: token\ndata: {json.dumps(pending_note)}\n\n"
-                    pending_note = ""
-                yield f"event: token\ndata: {json.dumps(piece)}\n\n"
+                if decided:
+                    yield f"event: token\ndata: {json.dumps(piece)}\n\n"
+                else:
+                    held += piece
+                    if len(held) >= 60:
+                        tokens, drifted = open_answer()
+                        decided = True
+                        for t in tokens:
+                            yield f"event: token\ndata: {json.dumps(t)}\n\n"
             if chunk.get("done"):
+                if not decided and held:
+                    tokens, drifted = open_answer()
+                    decided = True
+                    for t in tokens:
+                        yield f"event: token\ndata: {json.dumps(t)}\n\n"
                 # Say so when the length ceiling stopped the answer, rather than
                 # letting a truncated answer look complete.
                 if chunk.get("done_reason") == "length":
                     yield f"event: token\ndata: {json.dumps(CUT_SHORT)}\n\n"
                 break
-    if written_in in VERIFY_TRANSLATION:
-        yield f"event: token\ndata: {json.dumps(VERIFY_TRANSLATION[written_in])}\n\n"
+    warn = written_in if written_in in VERIFY_TRANSLATION else drifted
+    if warn:
+        yield f"event: token\ndata: {json.dumps(VERIFY_TRANSLATION[warn])}\n\n"
     yield "event: done\ndata: {}\n\n"
 
 

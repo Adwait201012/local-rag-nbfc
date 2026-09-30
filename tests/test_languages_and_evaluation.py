@@ -407,3 +407,61 @@ def test_explicit_hindi_gets_translation_warning(monkeypatch):
     tokens = [d for e, d in zip(events, data) if e == "token"]
     assert tokens[-1] == api.VERIFY_TRANSLATION["hi"]
     assert api.ENGLISH_ON_PURPOSE["hi"] not in tokens
+
+
+def _stream_pieces(monkeypatch, body, pieces):
+    """Run /api/chat with a fake model that streams the given answer pieces."""
+    seen = {}
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            seen["messages"] = json.loads(request.content)["messages"]
+            lines = [{"message": {"thinking": "checking", "content": ""}, "done": False}]
+            lines += [{"message": {"content": p}, "done": False} for p in pieces]
+            lines += [{"message": {"content": ""}, "done": True, "done_reason": "stop"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json=body)
+        cur, tokens = None, []
+        for line in r.text.splitlines():
+            if line.startswith("event: "):
+                cur = line[7:]
+            elif line.startswith("data: ") and cur == "token":
+                tokens.append(json.loads(line[6:]))
+        return tokens
+    return asyncio.run(run()), seen
+
+
+HINDI_Q = "सार्वजनिक जमा की अवधि कितनी होनी चाहिए?"
+
+
+def test_english_instruction_is_repeated_beside_a_hindi_question(monkeypatch):
+    _, seen = _stream_pieces(monkeypatch, {"query": HINDI_Q}, ["12 to 60 months [1]."])
+    assert seen["messages"][-1]["content"].endswith("even though the question is in Hindi.")
+    _, seen = _stream_pieces(monkeypatch, {"query": "What period must a public deposit have?"}, ["ok"])
+    assert "English only" not in seen["messages"][-1]["content"]
+
+
+def test_note_is_dropped_when_the_model_answers_in_hindi_anyway(monkeypatch):
+    hindi = ["सार्वजनिक जमा की अवधि ", "कम से कम 12 महीने ", "और अधिकतम 60 महीने होनी चाहिए [1]।"]
+    tokens, _ = _stream_pieces(monkeypatch, {"query": HINDI_Q}, hindi)
+    assert api.ENGLISH_ON_PURPOSE["hi"] not in tokens          # never claims English falsely
+    assert tokens[-1] == api.VERIFY_TRANSLATION["hi"]          # warns instead
+    assert "".join(tokens[:-1]) == "".join(hindi)              # answer text intact
+
+
+def test_long_english_answer_gets_note_first_and_text_intact(monkeypatch):
+    pieces = ["A public deposit ", "must be repayable ", "after twelve months ", "but not later than ",
+              "sixty months from ", "acceptance [1]."]
+    tokens, _ = _stream_pieces(monkeypatch, {"query": HINDI_Q}, pieces)
+    assert tokens[0] == api.ENGLISH_ON_PURPOSE["hi"]
+    assert "".join(tokens[1:]) == "".join(pieces)
+    assert api.VERIFY_TRANSLATION["hi"] not in tokens
