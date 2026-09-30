@@ -137,6 +137,36 @@ def resolve_language(query: str, language: str) -> str:
     return detect_language(query) if language == "auto" else language
 
 
+def answer_language(query: str, language: str) -> str:
+    """The language the answer is written in.
+
+    Detected Hindi and Hinglish are answered in English. Tested on this model,
+    writing regulatory answers in either damaged the meaning: a Hinglish answer
+    reversed a rule ("cannot accept fresh deposits" became "can"), and a Hindi
+    answer turned "sixty months" into a wrong word that reads as a different
+    figure. The model understands both languages well; it is writing them that
+    fails. The regulations exist only in English, so a correct English answer
+    beats a damaged translation. Choosing Hindi or Hinglish explicitly still
+    asks for it, with a note to verify against the English source.
+    """
+    resolved = resolve_language(query, language)
+    return "en" if language == "auto" and resolved in ("hi", "hinglish") else resolved
+
+
+# Fixed, pre-written notes. They are shown as written and never pass through the
+# model, so they cannot be mistranslated.
+ENGLISH_ON_PURPOSE = {
+    "hi": "(यह उत्तर अंग्रेज़ी में दिया गया है, क्योंकि RBI के मूल नियम अंग्रेज़ी में हैं "
+          "और अनुवाद से अर्थ बदल सकता है।)\n\n",
+    "hinglish": "(Yeh answer English mein hai, kyunki RBI ke rules English mein hain "
+                "aur translation se meaning badal sakta hai.)\n\n",
+}
+VERIFY_TRANSLATION = {
+    "hi": "\n\n(यह अनुवाद मशीन द्वारा किया गया है। कृपया उद्धृत अंग्रेज़ी स्रोत से इसकी पुष्टि करें।)",
+    "hinglish": "\n\n(Yeh translation machine ka hai. Please cited English source se verify karein.)",
+}
+
+
 def no_match(query: str, language: str) -> str:
     language = resolve_language(query, language)
     if language == "hi":
@@ -294,8 +324,13 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
         yield "event: done\ndata: {}\n\n"
         return
 
+    asked_in = resolve_language(query, language)
+    written_in = answer_language(query, language)
+    # Held back until the answer's first words, so the page keeps showing its
+    # "Reasoning..." status while the model thinks instead of clearing it early.
+    pending_note = ENGLISH_ON_PURPOSE[asked_in] if written_in == "en" and asked_in in ENGLISH_ON_PURPOSE else ""
     messages = [
-        {"role": "system", "content": answer_prompt(resolve_language(query, language), prompt_version)},
+        {"role": "system", "content": answer_prompt(written_in, prompt_version)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
     ]
     payload = await ollama_chat(messages, temperature, stream=True, think=think)
@@ -314,6 +349,9 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
                 yield f"event: status\ndata: {json.dumps('thinking')}\n\n"
             piece = message.get("content", "")
             if piece:
+                if pending_note:
+                    yield f"event: token\ndata: {json.dumps(pending_note)}\n\n"
+                    pending_note = ""
                 yield f"event: token\ndata: {json.dumps(piece)}\n\n"
             if chunk.get("done"):
                 # Say so when the length ceiling stopped the answer, rather than
@@ -321,6 +359,8 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
                 if chunk.get("done_reason") == "length":
                     yield f"event: token\ndata: {json.dumps(CUT_SHORT)}\n\n"
                 break
+    if written_in in VERIFY_TRANSLATION:
+        yield f"event: token\ndata: {json.dumps(VERIFY_TRANSLATION[written_in])}\n\n"
     yield "event: done\ndata: {}\n\n"
 
 
@@ -446,7 +486,7 @@ async def openai_chat(body: dict) -> dict:
         raise HTTPException(400, "no user message")
     query = user_turns[-1]["content"]
     language = body.get("language", "auto")
-    system_prompt = answer_prompt(resolve_language(query, language))
+    system_prompt = answer_prompt(answer_language(query, language))
 
     passages = await retrieve(query, TOP_K_FINAL)
     prompt = f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"

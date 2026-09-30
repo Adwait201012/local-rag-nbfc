@@ -322,7 +322,7 @@ def test_hinglish_is_detected_without_mistaking_english():
     assert api.resolve_language("Public deposit ka period kitna hai?", "en") == "en"   # explicit choice wins
 
 
-def test_auto_gives_the_model_an_explicit_hinglish_instruction(monkeypatch):
+def test_auto_answers_detected_hinglish_in_english(monkeypatch):
     prompts = []
 
     async def run():
@@ -340,6 +340,70 @@ def test_auto_gives_the_model_an_explicit_hinglish_instruction(monkeypatch):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
                 await client.post("/api/chat", json={"query": "Public deposit ka period kitna hona chahiye?"})
                 await client.post("/api/chat", json={"query": "What period must a public deposit have?"})
+                await client.post("/api/chat", json={"query": "Public deposit ka period kitna hona chahiye?",
+                                                     "language": "hinglish"})
+                await client.post("/api/chat", json={"query": "सार्वजनिक जमा की अवधि कितनी होनी चाहिए?"})
     asyncio.run(run())
-    assert prompts[0].endswith(api.LANGUAGE_RULES["hinglish"])
+    assert prompts[0].endswith(api.LANGUAGE_RULES["en"])        # detected Hinglish -> English answer
     assert prompts[1].endswith(api.LANGUAGE_RULES["en"])
+    assert prompts[2].endswith(api.LANGUAGE_RULES["hinglish"])  # explicit choice still honoured
+    assert prompts[3].endswith(api.LANGUAGE_RULES["en"])        # detected Hindi -> English answer
+
+
+def test_no_match_message_stays_in_hinglish():
+    assert "jaankari nahi mili" in api.no_match("Public deposit ka period kitna hona chahiye?", "auto")
+
+
+
+def _stream(monkeypatch, body):
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            lines = [{"message": {"thinking": "checking", "content": ""}, "done": False},
+                     {"message": {"content": "12 to 60 months [1]."}, "done": True, "done_reason": "stop"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json=body)
+        events, data, cur = [], [], None
+        for line in r.text.splitlines():
+            if line.startswith("event: "):
+                cur = line[7:]
+            elif line.startswith("data: "):
+                events.append(cur); data.append(json.loads(line[6:]))
+        return events, data
+    return asyncio.run(run())
+
+
+def test_hindi_question_gets_fixed_note_then_english_answer(monkeypatch):
+    events, data = _stream(monkeypatch, {"query": "सार्वजनिक जमा की अवधि कितनी होनी चाहिए?"})
+    tokens = [d for e, d in zip(events, data) if e == "token"]
+    assert tokens[0] == api.ENGLISH_ON_PURPOSE["hi"]
+    assert tokens[1] == "12 to 60 months [1]."
+    # the thinking status arrives before the note, so the page can still show it
+    assert events.index("status") < events.index("token")
+
+
+def test_hinglish_question_gets_hinglish_note(monkeypatch):
+    events, data = _stream(monkeypatch, {"query": "Public deposit ka period kitna hona chahiye?"})
+    tokens = [d for e, d in zip(events, data) if e == "token"]
+    assert tokens[0] == api.ENGLISH_ON_PURPOSE["hinglish"]
+
+
+def test_english_question_gets_no_note(monkeypatch):
+    events, data = _stream(monkeypatch, {"query": "What period must a public deposit have?"})
+    tokens = [d for e, d in zip(events, data) if e == "token"]
+    assert tokens == ["12 to 60 months [1]."]
+
+
+def test_explicit_hindi_gets_translation_warning(monkeypatch):
+    events, data = _stream(monkeypatch, {"query": "What period must a public deposit have?", "language": "hi"})
+    tokens = [d for e, d in zip(events, data) if e == "token"]
+    assert tokens[-1] == api.VERIFY_TRANSLATION["hi"]
+    assert api.ENGLISH_ON_PURPOSE["hi"] not in tokens
