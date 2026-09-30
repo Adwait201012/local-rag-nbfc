@@ -1,0 +1,146 @@
+diff --git a/api/app.py b/api/app.py
+index 4d212f8..b1716c6 100755
+--- a/api/app.py
++++ b/api/app.py
+@@ -140,15 +140,31 @@ def resolve_language(query: str, language: str) -> str:
+ def answer_language(query: str, language: str) -> str:
+     """The language the answer is written in.
+ 
+-    Detected Hinglish is answered in English. Tested on this model, asking for
+-    Hinglish produced answers that slid into Devanagari and, once, reversed a
+-    rule ("cannot accept fresh deposits" became "can"); given the option, it
+-    answered in English anyway. The regulations exist only in English, Hinglish
+-    readers read English, and a correct English answer beats a reversed Hinglish
+-    one. Choosing Hinglish explicitly still asks for it.
++    Detected Hindi and Hinglish are answered in English. Tested on this model,
++    writing regulatory answers in either damaged the meaning: a Hinglish answer
++    reversed a rule ("cannot accept fresh deposits" became "can"), and a Hindi
++    answer turned "sixty months" into a wrong word that reads as a different
++    figure. The model understands both languages well; it is writing them that
++    fails. The regulations exist only in English, so a correct English answer
++    beats a damaged translation. Choosing Hindi or Hinglish explicitly still
++    asks for it, with a note to verify against the English source.
+     """
+     resolved = resolve_language(query, language)
+-    return "en" if language == "auto" and resolved == "hinglish" else resolved
++    return "en" if language == "auto" and resolved in ("hi", "hinglish") else resolved
++
++
++# Fixed, pre-written notes. They are shown as written and never pass through the
++# model, so they cannot be mistranslated.
++ENGLISH_ON_PURPOSE = {
++    "hi": "(यह उत्तर अंग्रेज़ी में दिया गया है, क्योंकि RBI के मूल नियम अंग्रेज़ी में हैं "
++          "और अनुवाद से अर्थ बदल सकता है।)\n\n",
++    "hinglish": "(Yeh answer English mein hai, kyunki RBI ke rules English mein hain "
++                "aur translation se meaning badal sakta hai.)\n\n",
++}
++VERIFY_TRANSLATION = {
++    "hi": "\n\n(यह अनुवाद मशीन द्वारा किया गया है। कृपया उद्धृत अंग्रेज़ी स्रोत से इसकी पुष्टि करें।)",
++    "hinglish": "\n\n(Yeh translation machine ka hai. Please cited English source se verify karein.)",
++}
+ 
+ 
+ def no_match(query: str, language: str) -> str:
+@@ -308,8 +324,13 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
+         yield "event: done\ndata: {}\n\n"
+         return
+ 
++    asked_in = resolve_language(query, language)
++    written_in = answer_language(query, language)
++    # Held back until the answer's first words, so the page keeps showing its
++    # "Reasoning..." status while the model thinks instead of clearing it early.
++    pending_note = ENGLISH_ON_PURPOSE[asked_in] if written_in == "en" and asked_in in ENGLISH_ON_PURPOSE else ""
+     messages = [
+-        {"role": "system", "content": answer_prompt(answer_language(query, language), prompt_version)},
++        {"role": "system", "content": answer_prompt(written_in, prompt_version)},
+         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
+     ]
+     payload = await ollama_chat(messages, temperature, stream=True, think=think)
+@@ -328,6 +349,9 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
+                 yield f"event: status\ndata: {json.dumps('thinking')}\n\n"
+             piece = message.get("content", "")
+             if piece:
++                if pending_note:
++                    yield f"event: token\ndata: {json.dumps(pending_note)}\n\n"
++                    pending_note = ""
+                 yield f"event: token\ndata: {json.dumps(piece)}\n\n"
+             if chunk.get("done"):
+                 # Say so when the length ceiling stopped the answer, rather than
+@@ -335,6 +359,8 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
+                 if chunk.get("done_reason") == "length":
+                     yield f"event: token\ndata: {json.dumps(CUT_SHORT)}\n\n"
+                 break
++    if written_in in VERIFY_TRANSLATION:
++        yield f"event: token\ndata: {json.dumps(VERIFY_TRANSLATION[written_in])}\n\n"
+     yield "event: done\ndata: {}\n\n"
+ 
+ 
+diff --git a/tests/test_languages_and_evaluation.py b/tests/test_languages_and_evaluation.py
+index 99b5024..f546f08 100644
+--- a/tests/test_languages_and_evaluation.py
++++ b/tests/test_languages_and_evaluation.py
+@@ -347,8 +347,63 @@ def test_auto_answers_detected_hinglish_in_english(monkeypatch):
+     assert prompts[0].endswith(api.LANGUAGE_RULES["en"])        # detected Hinglish -> English answer
+     assert prompts[1].endswith(api.LANGUAGE_RULES["en"])
+     assert prompts[2].endswith(api.LANGUAGE_RULES["hinglish"])  # explicit choice still honoured
+-    assert prompts[3].endswith(api.LANGUAGE_RULES["hi"])        # Hindi unaffected
++    assert prompts[3].endswith(api.LANGUAGE_RULES["en"])        # detected Hindi -> English answer
+ 
+ 
+ def test_no_match_message_stays_in_hinglish():
+     assert "jaankari nahi mili" in api.no_match("Public deposit ka period kitna hona chahiye?", "auto")
++
++
++
++def _stream(monkeypatch, body):
++    async def run():
++        async def retrieve(q, top_k, use_rerank=True, area=None):
++            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
++
++        def ollama(request):
++            lines = [{"message": {"thinking": "checking", "content": ""}, "done": False},
++                     {"message": {"content": "12 to 60 months [1]."}, "done": True, "done_reason": "stop"}]
++            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
++
++        monkeypatch.setattr(api, "retrieve", retrieve)
++        monkeypatch.setattr(api, "APP_PASSWORD", "")
++        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
++            monkeypatch.setitem(api.state, "http", llm)
++            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
++                r = await client.post("/api/chat", json=body)
++        events, data, cur = [], [], None
++        for line in r.text.splitlines():
++            if line.startswith("event: "):
++                cur = line[7:]
++            elif line.startswith("data: "):
++                events.append(cur); data.append(json.loads(line[6:]))
++        return events, data
++    return asyncio.run(run())
++
++
++def test_hindi_question_gets_fixed_note_then_english_answer(monkeypatch):
++    events, data = _stream(monkeypatch, {"query": "सार्वजनिक जमा की अवधि कितनी होनी चाहिए?"})
++    tokens = [d for e, d in zip(events, data) if e == "token"]
++    assert tokens[0] == api.ENGLISH_ON_PURPOSE["hi"]
++    assert tokens[1] == "12 to 60 months [1]."
++    # the thinking status arrives before the note, so the page can still show it
++    assert events.index("status") < events.index("token")
++
++
++def test_hinglish_question_gets_hinglish_note(monkeypatch):
++    events, data = _stream(monkeypatch, {"query": "Public deposit ka period kitna hona chahiye?"})
++    tokens = [d for e, d in zip(events, data) if e == "token"]
++    assert tokens[0] == api.ENGLISH_ON_PURPOSE["hinglish"]
++
++
++def test_english_question_gets_no_note(monkeypatch):
++    events, data = _stream(monkeypatch, {"query": "What period must a public deposit have?"})
++    tokens = [d for e, d in zip(events, data) if e == "token"]
++    assert tokens == ["12 to 60 months [1]."]
++
++
++def test_explicit_hindi_gets_translation_warning(monkeypatch):
++    events, data = _stream(monkeypatch, {"query": "What period must a public deposit have?", "language": "hi"})
++    tokens = [d for e, d in zip(events, data) if e == "token"]
++    assert tokens[-1] == api.VERIFY_TRANSLATION["hi"]
++    assert api.ENGLISH_ON_PURPOSE["hi"] not in tokens
