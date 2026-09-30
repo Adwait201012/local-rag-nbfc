@@ -309,3 +309,37 @@ def test_stream_announces_thinking_once_before_the_answer(monkeypatch):
     assert events.index("status") < events.index("token")
     assert events[0] == "sources" and events[-1] == "done"
     assert "Let me check" not in text          # the reasoning itself is never shown
+
+
+# ---------------------------------------------------------------- language detection
+
+def test_hinglish_is_detected_without_mistaking_english():
+    assert api.detect_language("Public deposit ka period kitna hona chahiye?") == "hinglish"
+    assert api.detect_language("Kya depositor teen mahine se pehle paisa nikal sakta hai?") == "hinglish"
+    assert api.detect_language("सार्वजनिक जमा की अवधि कितनी होनी चाहिए?") == "hi"
+    assert api.detect_language("What is the minimum CRAR for a Middle Layer NBFC?") == "en"
+    assert api.detect_language("Can a director's relative get a ₹6 lakh loan at par?") == "en"
+    assert api.resolve_language("Public deposit ka period kitna hai?", "en") == "en"   # explicit choice wins
+
+
+def test_auto_gives_the_model_an_explicit_hinglish_instruction(monkeypatch):
+    prompts = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            prompts.append(json.loads(request.content)["messages"][0]["content"])
+            return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                await client.post("/api/chat", json={"query": "Public deposit ka period kitna hona chahiye?"})
+                await client.post("/api/chat", json={"query": "What period must a public deposit have?"})
+    asyncio.run(run())
+    assert prompts[0].endswith(api.LANGUAGE_RULES["hinglish"])
+    assert prompts[1].endswith(api.LANGUAGE_RULES["en"])

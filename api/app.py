@@ -79,8 +79,14 @@ ResponseLanguage = Literal["auto", "en", "hi", "hinglish"]
 LANGUAGE_RULES = {
     "auto": "Follow the question's language and script.",
     "en": "Write the answer in English.",
-    "hi": "Write the answer in Hindi using Devanagari script.",
-    "hinglish": "Write the answer in Hinglish: conversational Hindi in Latin script mixed with English terms.",
+    "hi": ("Write the answer in Hindi using Devanagari script, but keep every regulatory "
+           "term, condition, figure and name in English exactly as the passages state them "
+           "(for example renew, fresh deposit, matured deposit, depositor's consent, NOF). "
+           "Use Hindi for the explanation around those terms. Never change a 'cannot' into a 'can'."),
+    "hinglish": ("Write the answer in Hinglish using only Latin (English) letters, never Devanagari. "
+                 "Use Hindi only for connecting words (hai, ka, ke liye, nahi, lekin, agar, jab tak). "
+                 "Keep every regulatory term, condition, figure and name in English exactly as the "
+                 "passages state them. If unsure how to say something in Hinglish, say it in English."),
 }
 
 
@@ -93,8 +99,47 @@ def answer_prompt(language: str = "auto", version: str | None = None) -> str:
     return PROMPTS[version] + "\nResponse language: " + LANGUAGE_RULES[language]
 
 
+# Hindi words as people type them in English letters. Hinglish looks like English to
+# a model reading the script alone, and with English passages it tends to answer in
+# English, so "auto" is resolved in code before the model sees the question.
+# Words that are also common English ("to", "me", "hi", "par", "so", "the") are left
+# out, so an English question is not mistaken for Hinglish.
+HINGLISH_WORDS = {
+    "hai", "hain", "ho", "hoga", "hogi", "honge", "hona", "hota", "hoti", "hote", "tha", "thi", "the_",
+    "kya", "kyun", "kyon", "kaise", "kab", "kahan", "kaun", "kitna", "kitni", "kitne", "konsa", "kaunsa",
+    "ka", "ki", "ke", "ko", "se", "mein", "mai", "pe", "tak", "liye", "wala", "wali", "wale",
+    "aur", "ya", "bhi", "nahi", "nahin", "mat", "sirf", "bas", "agar", "toh", "phir", "lekin", "par_",
+    "chahiye", "sakta", "sakti", "sakte", "karna", "karni", "karne", "karein", "karo", "kare", "kar",
+    "lena", "leni", "lene", "dena", "deni", "dene", "milta", "milti", "milega", "raha", "rahi", "rahe",
+    "hum", "humein", "hamara", "hamari", "aap", "aapka", "apna", "apne", "apni", "unka", "uska", "iska",
+    "yeh", "ye", "woh", "wo", "koi", "kuch", "sab", "zyada", "kam", "pehle", "baad", "abhi", "matlab",
+    "paisa", "paise", "saal", "mahine", "karod", "wapas", "nikal", "jama", "mukable",
+}
+HINGLISH_WORDS = {w for w in HINGLISH_WORDS if not w.endswith("_")}
+
+
+def detect_language(query: str) -> str:
+    """'hi' for Devanagari, 'hinglish' for Hindi in Latin letters, otherwise 'en'."""
+    if re.search(r"[\u0900-\u097f]", query):
+        return "hi"
+    words = re.findall(r"[a-z]+", query.lower())
+    if not words:
+        return "en"
+    hits = sum(1 for w in words if w in HINGLISH_WORDS)
+    # Two Hindi words, or a clear share of a short question, is enough; one stray
+    # match in a long English question is not.
+    if hits >= 2 and hits / len(words) >= 0.15:
+        return "hinglish"
+    return "en"
+
+
+def resolve_language(query: str, language: str) -> str:
+    return detect_language(query) if language == "auto" else language
+
+
 def no_match(query: str, language: str) -> str:
-    if language == "hi" or (language == "auto" and re.search(r"[\u0900-\u097f]", query)):
+    language = resolve_language(query, language)
+    if language == "hi":
         return "इंडेक्स किए गए दस्तावेज़ों में इस प्रश्न से संबंधित जानकारी नहीं मिली।"
     if language == "hinglish":
         return "Indexed documents mein is sawaal se judi jaankari nahi mili."
@@ -250,7 +295,7 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
         return
 
     messages = [
-        {"role": "system", "content": answer_prompt(language, prompt_version)},
+        {"role": "system", "content": answer_prompt(resolve_language(query, language), prompt_version)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
     ]
     payload = await ollama_chat(messages, temperature, stream=True, think=think)
@@ -401,7 +446,7 @@ async def openai_chat(body: dict) -> dict:
         raise HTTPException(400, "no user message")
     query = user_turns[-1]["content"]
     language = body.get("language", "auto")
-    system_prompt = answer_prompt(language)
+    system_prompt = answer_prompt(resolve_language(query, language))
 
     passages = await retrieve(query, TOP_K_FINAL)
     prompt = f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"
