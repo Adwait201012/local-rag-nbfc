@@ -314,6 +314,36 @@ async def ollama_chat(messages: list[dict], temperature: float, stream: bool,
     return r.json()["message"]["content"]
 
 
+TRANSLATE_PROMPT = """Translate the user's question into English.
+Output only the translated question: no quotes, no explanation, nothing else.
+Keep acronyms, numbers, amounts and regulatory terms unchanged (NBFC, NOF, KYC, CRAR, Rs 5 lakh)."""
+
+
+async def to_english(query: str) -> str | None:
+    """Translate a Hindi or Hinglish question into English, or None if it fails.
+
+    The answering model follows the language of the question it sees: told to
+    answer a Hindi question in English, it answered in Hindi anyway, and its
+    Hindi reversed a rule. So it is shown only an English question. Translating a
+    short question is far easier than translating a legal answer, and the result
+    is shown to the person, so a mistranslation is visible rather than silent.
+    """
+    try:
+        payload = {"model": LLM_MODEL, "stream": False, "think": False,
+                   "messages": [{"role": "system", "content": TRANSLATE_PROMPT},
+                                {"role": "user", "content": query}],
+                   "options": {"temperature": 0, "num_ctx": 2048, "num_predict": 200}}
+        r = await state["http"].post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=60)
+        r.raise_for_status()
+        text = r.json()["message"]["content"].strip().strip('"').strip()
+        # A translation that still contains Hindi, or is empty, is not usable.
+        if not text or detect_language(text) != "en":
+            return None
+        return text
+    except Exception:
+        return None
+
+
 async def stream_answer(query: str, passages: list[dict], temperature: float, language: str = "auto",
                         prompt_version: str | None = None,
                         think: bool | None = None) -> AsyncIterator[str]:
@@ -328,12 +358,17 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
     written_in = answer_language(query, language)
     english_on_purpose = written_in == "en" and asked_in in ENGLISH_ON_PURPOSE
     question = f"Question: {query}"
+    understood = None
     if english_on_purpose:
-        # The system-prompt instruction alone was ignored in testing: with a Hindi
-        # question right in front of it, the model answered in Hindi. Repeating
-        # the instruction last, beside the question, is what it weighs most.
-        name = {"hi": "Hindi", "hinglish": "Hinglish"}[asked_in]
-        question += f"\n\nWrite the answer in English only, even though the question is in {name}."
+        understood = await to_english(query)
+        if understood:
+            question = f"Question: {understood}"
+        else:
+            # Translation failed: fall back to the original question with the
+            # instruction repeated beside it. The note check below still catches
+            # an answer that drifts into Hindi.
+            name = {"hi": "Hindi", "hinglish": "Hinglish"}[asked_in]
+            question += f"\n\nWrite the answer in English only, even though the question is in {name}."
     messages = [
         {"role": "system", "content": answer_prompt(written_in, prompt_version)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\n{question}"},
@@ -350,7 +385,10 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
         lang = detect_language(held)
         if lang in VERIFY_TRANSLATION:
             return [held], lang
-        return [ENGLISH_ON_PURPOSE[asked_in], held], None
+        note = ENGLISH_ON_PURPOSE[asked_in]
+        if understood:
+            note += f"Question understood as: {understood}\n\n"
+        return [note, held], None
 
     payload = await ollama_chat(messages, temperature, stream=True, think=think)
     async with state["http"].stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:

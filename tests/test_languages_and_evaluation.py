@@ -1,3 +1,4 @@
+import re
 import asyncio
 import importlib.util
 import json
@@ -330,7 +331,10 @@ def test_auto_answers_detected_hinglish_in_english(monkeypatch):
             return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
 
         def ollama(request):
-            prompts.append(json.loads(request.content)["messages"][0]["content"])
+            req = json.loads(request.content)
+            if req["stream"] is False:          # the question-translation step
+                return httpx.Response(200, json={"message": {"content": "What is the deposit period?"}})
+            prompts.append(req["messages"][0]["content"])
             return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
 
         monkeypatch.setattr(api, "retrieve", retrieve)
@@ -465,3 +469,73 @@ def test_long_english_answer_gets_note_first_and_text_intact(monkeypatch):
     assert tokens[0] == api.ENGLISH_ON_PURPOSE["hi"]
     assert "".join(tokens[1:]) == "".join(pieces)
     assert api.VERIFY_TRANSLATION["hi"] not in tokens
+
+
+def _stream_translated(monkeypatch, body, translation, answer="A public deposit must run 12 to 60 months [1]."):
+    """Fake model: answers the translation call with `translation`, streams `answer` otherwise."""
+    calls = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            req = json.loads(request.content)
+            calls.append(req)
+            if req["stream"] is False:
+                if translation is None:
+                    return httpx.Response(500, text="boom")
+                return httpx.Response(200, json={"message": {"content": translation}})
+            lines = [{"message": {"thinking": "x", "content": ""}, "done": False},
+                     {"message": {"content": answer}, "done": True, "done_reason": "stop"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json=body)
+        cur, tokens = None, []
+        for line in r.text.splitlines():
+            if line.startswith("event: "):
+                cur = line[7:]
+            elif line.startswith("data: ") and cur == "token":
+                tokens.append(json.loads(line[6:]))
+        return tokens
+    return asyncio.run(run()), calls
+
+
+def test_hindi_question_is_translated_and_model_never_sees_hindi(monkeypatch):
+    tokens, calls = _stream_translated(monkeypatch, {"query": HINDI_Q},
+                                       "What should the period of a public deposit be?")
+    translate, answer = calls
+    assert translate["think"] is False and "Translate" in translate["messages"][0]["content"]
+    user_msg = answer["messages"][-1]["content"]
+    assert "Question: What should the period of a public deposit be?" in user_msg
+    assert not re.search(r"[\u0900-\u097f]", user_msg)          # no Hindi reaches the answering model
+    assert tokens[0].startswith(api.ENGLISH_ON_PURPOSE["hi"])
+    assert "Question understood as: What should the period of a public deposit be?" in tokens[0]
+
+
+def test_hinglish_question_is_translated_too(monkeypatch):
+    tokens, calls = _stream_translated(monkeypatch, {"query": "Public deposit ka period kitna hona chahiye?"},
+                                       "What should the period of a public deposit be?")
+    assert "Question: What should the period" in calls[1]["messages"][-1]["content"]
+    assert "Question understood as:" in tokens[0]
+
+
+def test_failed_translation_falls_back_to_the_instruction(monkeypatch):
+    tokens, calls = _stream_translated(monkeypatch, {"query": HINDI_Q}, None)
+    assert calls[-1]["messages"][-1]["content"].endswith("even though the question is in Hindi.")
+    assert "understood as" not in tokens[0]
+
+
+def test_translation_still_in_hindi_is_rejected(monkeypatch):
+    tokens, calls = _stream_translated(monkeypatch, {"query": HINDI_Q}, "सार्वजनिक जमा की अवधि?")
+    assert calls[-1]["messages"][-1]["content"].endswith("even though the question is in Hindi.")
+
+
+def test_english_question_is_not_translated(monkeypatch):
+    tokens, calls = _stream_translated(monkeypatch, {"query": "What period must a public deposit have?"}, "x")
+    assert len(calls) == 1                                      # no translation call at all
