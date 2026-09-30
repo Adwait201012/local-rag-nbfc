@@ -232,3 +232,51 @@ def test_v2_does_not_open_unanswerable_questions_with_yes_or_no():
     v2 = api.answer_prompt("auto", "v2")
     assert "say so in the first sentence" in v2
     assert 'Never\n  open with "yes" or "no"' in v2
+
+
+# ---------------------------------------------------------------- thinking and length cap
+
+def test_think_setting_and_length_cap_reach_the_model(monkeypatch):
+    payloads = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                await client.post("/api/chat", json={"query": "q", "think": False})
+                await client.post("/api/chat", json={"query": "q", "think": True})
+                await client.post("/api/chat", json={"query": "q"})
+    asyncio.run(run())
+    assert [p["think"] for p in payloads] == [False, True, api.LLM_THINK]
+    assert all(p["options"]["num_predict"] == api.LLM_MAX_TOKENS for p in payloads)
+
+
+def test_answer_cut_by_length_limit_says_so(monkeypatch):
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            lines = [{"message": {"content": "partial answer"}, "done": False},
+                     {"message": {"content": ""}, "done": True, "done_reason": "length"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json={"query": "q"})
+                tokens = [json.loads(l[6:]) for l in r.text.splitlines() if l.startswith("data: ")]
+                assert "partial answer" in tokens
+                assert any("cut short" in str(t) for t in tokens)
+    asyncio.run(run())

@@ -29,6 +29,7 @@ REFUSAL_MARKERS = [
     "do not include", "does not include",
     "do not discuss", "does not discuss", "not discussed",
     "do not state", "does not state",
+    "do not provide", "does not provide", "not explicitly",
     "no information", "no explicit", "no details", "no reference to",
     "no passage", "not in the", "not present", "not available",
     "cannot find", "can't find", "cannot be determined", "not covered",
@@ -52,11 +53,12 @@ def login(client: httpx.Client, base: str, password: str | None) -> None:
 
 
 def ask(client: httpx.Client, base: str, question: str, area: str | None = None,
-        prompt: str | None = None) -> tuple[str, list[dict]]:
+        prompt: str | None = None, think: bool | None = None) -> tuple[str, list[dict]]:
     """Stream one answer out of /api/chat, collecting text and cited sources."""
     answer, sources = [], []
     with client.stream("POST", f"{base}/api/chat",
-                       json={"query": question, "area": area, "prompt_version": prompt}, timeout=300) as resp:
+                       json={"query": question, "area": area, "prompt_version": prompt, "think": think},
+                       timeout=300) as resp:
         resp.raise_for_status()
         event = ""
         for line in resp.iter_lines():
@@ -159,6 +161,8 @@ def main() -> int:
     ap.add_argument("--area", default=None, help="search only this area, e.g. gst (default: all)")
     ap.add_argument("--prompt", choices=["v1", "v2"], default=None,
                     help="answering instructions to use; results file gets this suffix")
+    ap.add_argument("--think", choices=["on", "off"], default=None,
+                    help="model's hidden reasoning; results file gets a _think/_nothink suffix")
     args = ap.parse_args()
 
     df = pd.read_excel(args.sheet)
@@ -175,7 +179,8 @@ def main() -> int:
             q = str(row["question"])
             t0 = time.time()
             try:
-                answer, sources = ask(client, args.api, q, args.area, args.prompt)
+                think = None if args.think is None else args.think == "on"
+                answer, sources = ask(client, args.api, q, args.area, args.prompt, think)
                 flag, note = assess(row, answer, sources)
             except Exception as exc:
                 answer, sources = "", []
@@ -217,6 +222,8 @@ def main() -> int:
     df = df[order + manual]
 
     suffix = f"_results_{args.prompt}" if args.prompt else "_results"
+    if args.think:
+        suffix += "_think" if args.think == "on" else "_nothink"
     out = args.sheet.rsplit(".", 1)[0] + suffix + ".xlsx"
     df.to_excel(out, index=False)
 

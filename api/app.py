@@ -133,6 +133,7 @@ class ChatRequest(BaseModel):
     language: ResponseLanguage = "auto"
     area: str | None = None
     prompt_version: PromptVersion | None = None
+    think: bool | None = None
 
 
 # ---------------------------------------------------------------- retrieval
@@ -209,12 +210,27 @@ def build_context(passages: list[dict]) -> str:
 
 # ---------------------------------------------------------------- generation
 
-async def ollama_chat(messages: list[dict], temperature: float, stream: bool):
+# Qwen3 reasons silently before answering unless told not to. Measured on this
+# machine, that hidden reasoning was most of every answer's wait (~2,000 characters
+# for a one-sentence question). Whether it improves regulatory answers enough to be
+# worth the time is measured, not assumed, so it is switchable per request.
+LLM_THINK = os.getenv("LLM_THINK", "true").lower() in ("1", "true", "yes")
+# Hard ceiling on generated tokens, hidden reasoning included. Without it a model
+# stuck repeating itself runs until the client gives up, which is what produced the
+# five-minute timeouts. Real answers here use a few hundred tokens.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "3072"))
+CUT_SHORT = "\n\n[Answer cut short at the length limit. Try a narrower question.]"
+
+
+async def ollama_chat(messages: list[dict], temperature: float, stream: bool,
+                      think: bool | None = None):
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
         "stream": stream,
-        "options": {"temperature": temperature, "num_ctx": NUM_CTX},
+        "think": LLM_THINK if think is None else think,
+        "options": {"temperature": temperature, "num_ctx": NUM_CTX,
+                    "num_predict": LLM_MAX_TOKENS},
     }
     if stream:
         return payload
@@ -224,7 +240,8 @@ async def ollama_chat(messages: list[dict], temperature: float, stream: bool):
 
 
 async def stream_answer(query: str, passages: list[dict], temperature: float, language: str = "auto",
-                        prompt_version: str | None = None) -> AsyncIterator[str]:
+                        prompt_version: str | None = None,
+                        think: bool | None = None) -> AsyncIterator[str]:
     yield f"event: sources\ndata: {json.dumps([{k: v for k, v in p.items() if k != 'text'} for p in passages])}\n\n"
 
     if not passages:
@@ -236,7 +253,7 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
         {"role": "system", "content": answer_prompt(language, prompt_version)},
         {"role": "user", "content": f"Context passages:\n\n{build_context(passages)}\n\nQuestion: {query}"},
     ]
-    payload = await ollama_chat(messages, temperature, stream=True)
+    payload = await ollama_chat(messages, temperature, stream=True, think=think)
     async with state["http"].stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
@@ -247,6 +264,10 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
             if piece:
                 yield f"event: token\ndata: {json.dumps(piece)}\n\n"
             if chunk.get("done"):
+                # Say so when the length ceiling stopped the answer, rather than
+                # letting a truncated answer look complete.
+                if chunk.get("done_reason") == "length":
+                    yield f"event: token\ndata: {json.dumps(CUT_SHORT)}\n\n"
                 break
     yield "event: done\ndata: {}\n\n"
 
@@ -352,7 +373,7 @@ async def api_search(req: SearchRequest) -> dict:
 async def api_chat(req: ChatRequest) -> StreamingResponse:
     passages = await retrieve(req.query, req.top_k, area=req.area)
     return StreamingResponse(
-        stream_answer(req.query, passages, req.temperature, req.language, req.prompt_version),
+        stream_answer(req.query, passages, req.temperature, req.language, req.prompt_version, req.think),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
