@@ -95,6 +95,9 @@ services:
       INGEST_URL: http://ingest:8082
       APP_PASSWORD: ${APP_PASSWORD:-}
       SESSION_SECRET: ${SESSION_SECRET:-rag-dev-secret}
+      PROMPT_VERSION: ${PROMPT_VERSION:-v1}
+      LLM_THINK: ${LLM_THINK:-true}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-3072}
     volumes:
       - ./corpus:/data
     ports:
