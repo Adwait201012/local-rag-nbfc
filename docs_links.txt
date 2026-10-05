@@ -1,0 +1,25 @@
+# Documents for the CA areas.
+#
+# Format:  area | filename | url
+#
+# For each line, open the official page in your browser, right-click the PDF
+# download link, choose "Copy link address", and paste it after the second |.
+# Lines with no URL are skipped, so you can fill them in gradually.
+#
+# Use the LATEST AMENDED (consolidated) version. An Act "as originally enacted"
+# would make Vidhi quote outdated law with full confidence.
+#
+# Official sources only:
+#   Income-tax Act / Rules  -> Income Tax Department site: Tax Laws & Rules > Acts / Rules
+#   CGST Act / Rules        -> CBIC GST portal: GST Acts / GST Rules
+#   Companies Act, LLP Act  -> MCA site (Acts & Rules), or India Code
+#
+# Keep the two Income-tax Acts clearly named so citations never confuse them.
+
+income_tax    | Income-tax-Act-2025.pdf          |
+income_tax    | Income-tax-Rules-2026.pdf        |
+income_tax    | Income-tax-Act-1961-amended.pdf  |
+gst           | CGST-Act-2017-amended.pdf        |
+gst           | CGST-Rules-2017-amended.pdf      |
+companies_act | Companies-Act-2013-amended.pdf   |
+llp           | LLP-Act-2008-amended.pdf         |
