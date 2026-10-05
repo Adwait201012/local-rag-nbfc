@@ -32,6 +32,7 @@ REFUSAL_MARKERS = [
     "do not provide", "does not provide", "not explicitly",
     "do not define", "does not define", "do not directly", "does not directly",
     "do not explain", "does not explain", "cannot be derived",
+    "do not cover", "does not cover",
     "no information", "no explicit", "no details", "no reference to",
     "no passage", "not in the", "not present", "not available",
     "cannot find", "can't find", "cannot be determined", "not covered",
@@ -161,7 +162,7 @@ def main() -> int:
     ap.add_argument("--password", default=None)
     ap.add_argument("--limit", type=int, default=None, help="run only the first N rows")
     ap.add_argument("--area", default=None, help="search only this area, e.g. gst (default: all)")
-    ap.add_argument("--prompt", choices=["v1", "v2"], default=None,
+    ap.add_argument("--prompt", choices=["v1", "v2", "v3"], default=None,
                     help="answering instructions to use; results file gets this suffix")
     ap.add_argument("--think", choices=["on", "off"], default=None,
                     help="model's hidden reasoning; results file gets a _think/_nothink suffix")

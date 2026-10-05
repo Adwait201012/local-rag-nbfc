@@ -67,12 +67,29 @@ COMPLETENESS_RULES = """- If the passages answer the question, start with the di
   customer, amount), cover each case separately.
 - Keep each point short. No preamble, and nothing the passages do not support."""
 
+# v3 adds a rule against carrying a rule across laws. Tested on income-tax
+# questions with only RBI documents indexed, v2 answered "depreciation under the
+# Income-tax Act" with an RBI asset-valuation rate, cited as if it were tax law:
+# the same word appeared in both, so the passage looked relevant. Each passage
+# is labelled with its source document, so the model can check where it is from.
+SOURCE_LAW_RULE = """- Each passage is labelled with the document it comes from. If the question is
+  about a specific law, Act, tax, return or form (for example the Income-tax Act,
+  GST, an ITR, the Companies Act, SEBI rules) and none of the passages come from
+  it, say in the first sentence that the passages do not cover it.
+- Never apply a rule, rate, limit or figure from one regulation to a different
+  one, even when the same word (depreciation, deduction, valuation, records,
+  penalty) appears in both."""
+
 PROMPTS = {
     "v1": SYSTEM_PROMPT,
     "v2": SYSTEM_PROMPT.replace("- Be concise. No preamble.", COMPLETENESS_RULES),
 }
+PROMPTS["v3"] = PROMPTS["v2"].replace(
+    "- Keep each point short. No preamble, and nothing the passages do not support.",
+    SOURCE_LAW_RULE + "\n- Keep each point short. No preamble, and nothing the passages do not support.")
 assert PROMPTS["v2"] != PROMPTS["v1"], "v2 rule replacement failed"
-PromptVersion = Literal["v1", "v2"]
+assert PROMPTS["v3"] != PROMPTS["v2"], "v3 rule insertion failed"
+PromptVersion = Literal["v1", "v2", "v3"]
 DEFAULT_PROMPT = os.getenv("PROMPT_VERSION", "v1")
 
 ResponseLanguage = Literal["auto", "en", "hi", "hinglish"]
@@ -95,7 +112,7 @@ def answer_prompt(language: str = "auto", version: str | None = None) -> str:
         raise HTTPException(422, "language must be auto, en, hi, or hinglish")
     version = version or DEFAULT_PROMPT
     if version not in PROMPTS:
-        raise HTTPException(422, "prompt_version must be v1 or v2")
+        raise HTTPException(422, "prompt_version must be v1, v2 or v3")
     return PROMPTS[version] + "\nResponse language: " + LANGUAGE_RULES[language]
 
 

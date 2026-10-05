@@ -539,3 +539,11 @@ def test_translation_still_in_hindi_is_rejected(monkeypatch):
 def test_english_question_is_not_translated(monkeypatch):
     tokens, calls = _stream_translated(monkeypatch, {"query": "What period must a public deposit have?"}, "x")
     assert len(calls) == 1                                      # no translation call at all
+
+
+
+def test_v3_is_v2_plus_the_source_law_rule():
+    v2, v3 = api.answer_prompt("auto", "v2"), api.answer_prompt("auto", "v3")
+    assert "Never apply a rule, rate, limit or figure from one regulation" in v3
+    assert "Never apply a rule" not in v2
+    assert v3.replace(api.SOURCE_LAW_RULE + "\n", "") == v2      # nothing else differs
