@@ -30,6 +30,8 @@ REFUSAL_MARKERS = [
     "do not discuss", "does not discuss", "not discussed",
     "do not state", "does not state",
     "do not provide", "does not provide", "not explicitly",
+    "do not define", "does not define", "do not directly", "does not directly",
+    "do not explain", "does not explain", "cannot be derived",
     "no information", "no explicit", "no details", "no reference to",
     "no passage", "not in the", "not present", "not available",
     "cannot find", "can't find", "cannot be determined", "not covered",
