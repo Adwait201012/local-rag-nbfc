@@ -588,3 +588,43 @@ def test_budget_hit_mid_answer_says_cut_short(monkeypatch):
 
 def test_default_budget_is_6144():
     assert api.LLM_MAX_TOKENS == 6144
+
+
+# ---------------------------------------------------------------- Income-tax Act routing
+
+def test_question_naming_one_act_is_routed_and_the_page_is_told(monkeypatch):
+    seen = []
+
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            seen.append(area)
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        async def areas():
+            return {"rbi", "income_tax", "income_tax_1961"}
+
+        def ollama(request):
+            return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "known_areas", areas)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r1 = await client.post("/api/chat", json={"query": "Who must be audited under the Income-tax Act, 1961?"})
+                r2 = await client.post("/api/chat", json={"query": "What is the CRAR for an NBFC?"})
+                r3 = await client.post("/api/chat", json={"query": "Audit under the 1961 Act?", "area": "income_tax"})
+                s1 = await client.post("/api/search", json={"query": "What is a tax year under the Income-tax Act, 2025?"})
+        return r1.text, r2.text, r3.text, s1.json()
+    t1, t2, t3, s1 = asyncio.run(run())
+    assert seen[:3] == ["income_tax_1961", None, "income_tax"]     # routed, untouched, explicit wins
+    assert "event: scope" in t1 and "income_tax_1961" in t1
+    assert "event: scope" not in t2 and "event: scope" not in t3
+    assert s1["area"] == "income_tax" and s1["routed"]
+
+
+def test_routing_lookup_failure_never_breaks_answering(monkeypatch):
+    monkeypatch.setitem(api._area_cache, "at", 0.0)
+    monkeypatch.delitem(api.state, "pool", raising=False)
+    assert asyncio.run(api.known_areas()) == set()

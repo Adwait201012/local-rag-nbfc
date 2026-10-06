@@ -78,7 +78,8 @@ def worth_asking(text: str) -> bool:
 # a CA asks about income tax differently from an NBFC compliance officer.
 AREAS = {
     "rbi": ("RBI regulations", "a compliance officer, banker or company secretary"),
-    "income_tax": ("Indian income-tax law", "a chartered accountant, tax practitioner or taxpayer"),
+    "income_tax": ("Indian income-tax law (Income-tax Act, 2025)", "a chartered accountant, tax practitioner or taxpayer"),
+    "income_tax_1961": ("Indian income-tax law (Income-tax Act, 1961)", "a chartered accountant, tax practitioner or taxpayer"),
     "gst": ("Indian GST law", "a chartered accountant, GST practitioner or business owner"),
     "companies_act": ("Indian company law", "a company secretary, chartered accountant or company director"),
     "llp": ("Indian LLP law", "a chartered accountant or an LLP partner"),

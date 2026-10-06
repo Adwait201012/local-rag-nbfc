@@ -255,6 +255,58 @@ def clean_area(area: str | None) -> str | None:
     return AREA_NAME.sub("_", area.strip().lower()).strip("_") or None
 
 
+# Year-based routing between the two Income-tax Acts.
+#
+# The 1961 Act governs tax years before April 2026; the 2025 Act governs later
+# ones. Searched together, the model blended them: asked about audit "under the
+# Income-tax Act, 1961" it quoted section 63 of the 2025 Act and called it 1961.
+# When a question clearly names one Act, only that Act's area is searched. The
+# signals are deliberately narrow: a bare "2025" is NOT used, because RBI
+# directions are titled "... Directions, 2025" and would be misrouted.
+ROUTES = [
+    ("income_tax_1961", re.compile(
+        r"\b1961\b|\bassessment\s+years?\b|\bA\.?Y\.?\s*20\d\d", re.I)),
+    ("income_tax", re.compile(
+        r"income[\s-]*tax\s+act,?\s*2025|income[\s-]*tax\s+rules,?\s*2026|\btax\s+years?\b"
+        r"|\bnew\s+(?:income[\s-]*)?tax\s+act\b", re.I)),
+]
+_area_cache: dict = {"at": 0.0, "areas": set()}
+
+
+async def known_areas() -> set[str]:
+    """Areas that currently hold documents, refreshed at most once a minute.
+
+    Routing is an extra: if the lookup fails, return no areas, which simply turns
+    routing off for that question. It must never be able to break answering.
+    """
+    if time.time() - _area_cache["at"] > 60:
+        try:
+            async with state["pool"].connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT DISTINCT area FROM documents")
+                    _area_cache["areas"] = {r[0] for r in await cur.fetchall()}
+            _area_cache["at"] = time.time()
+        except Exception:
+            return set()
+    return _area_cache["areas"]
+
+
+def route_area(query: str, chosen: str | None, available: set[str]) -> tuple[str | None, str | None]:
+    """(area to search, reason) - reason is set only when the area was chosen automatically.
+
+    An explicit choice always wins. A question that names both Acts, or neither,
+    searches everything. A route to an area with no documents is not taken.
+    """
+    if clean_area(chosen):
+        return clean_area(chosen), None
+    hits = [area for area, pattern in ROUTES if pattern.search(query)]
+    if len(hits) != 1 or hits[0] not in available:
+        return None, None
+    label = {"income_tax_1961": "the question refers to the Income-tax Act, 1961 or an assessment year",
+             "income_tax": "the question refers to the Income-tax Act, 2025 or a tax year"}[hits[0]]
+    return hits[0], label
+
+
 async def _candidates(q: str, area: str | None = None) -> list[dict]:
     vec = await embed_query(q)
     async with state["pool"].connection() as conn:
@@ -550,15 +602,28 @@ async def health() -> dict:
 @app.post("/api/search")
 async def api_search(req: SearchRequest) -> dict:
     t0 = time.time()
-    results = await retrieve(req.query, req.top_k, req.rerank, req.area)
-    return {"query": req.query, "took_ms": int((time.time() - t0) * 1000), "results": results}
+    area, reason = route_area(req.query, req.area, await known_areas())
+    results = await retrieve(req.query, req.top_k, req.rerank, area)
+    return {"query": req.query, "took_ms": int((time.time() - t0) * 1000),
+            "area": area, "routed": reason, "results": results}
 
 
 @app.post("/api/chat")
 async def api_chat(req: ChatRequest) -> StreamingResponse:
-    passages = await retrieve(req.query, req.top_k, area=req.area)
+    area, reason = route_area(req.query, req.area, await known_areas())
+    passages = await retrieve(req.query, req.top_k, area=area)
+
+    async def with_scope():
+        # Tell the page when the search was narrowed automatically, so the
+        # person can see it and override it with "Search in" if it is wrong.
+        if reason:
+            yield f"event: scope\ndata: {json.dumps({'area': area, 'reason': reason})}\n\n"
+        async for part in stream_answer(req.query, passages, req.temperature, req.language,
+                                        req.prompt_version, req.think):
+            yield part
+
     return StreamingResponse(
-        stream_answer(req.query, passages, req.temperature, req.language, req.prompt_version, req.think),
+        with_scope(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
