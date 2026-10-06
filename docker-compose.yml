@@ -97,7 +97,7 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-rag-dev-secret}
       PROMPT_VERSION: ${PROMPT_VERSION:-v1}
       LLM_THINK: ${LLM_THINK:-true}
-      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-3072}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-6144}
     volumes:
       - ./corpus:/data
     ports:

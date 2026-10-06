@@ -547,3 +547,44 @@ def test_v3_is_v2_plus_the_source_law_rule():
     assert "Never apply a rule, rate, limit or figure from one regulation" in v3
     assert "Never apply a rule" not in v2
     assert v3.replace(api.SOURCE_LAW_RULE + "\n", "") == v2      # nothing else differs
+
+
+# ---------------------------------------------------------------- token budget
+
+def _length_stop(monkeypatch, query, pieces):
+    async def run():
+        async def retrieve(q, top_k, use_rerank=True, area=None):
+            return [{"source": "/data/x.pdf", "page": 1, "text": "rule"}]
+
+        def ollama(request):
+            req = json.loads(request.content)
+            if req["stream"] is False:
+                return httpx.Response(200, json={"message": {"content": "What is the rule?"}})
+            lines = [{"message": {"thinking": "long reasoning", "content": ""}, "done": False}]
+            lines += [{"message": {"content": p}, "done": False} for p in pieces]
+            lines += [{"message": {"content": ""}, "done": True, "done_reason": "length"}]
+            return httpx.Response(200, text="\n".join(json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr(api, "retrieve", retrieve)
+        monkeypatch.setattr(api, "APP_PASSWORD", "")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(ollama)) as llm:
+            monkeypatch.setitem(api.state, "http", llm)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
+                r = await client.post("/api/chat", json={"query": query})
+        return [json.loads(l[6:]) for l in r.text.splitlines() if l.startswith("data: ")]
+    return asyncio.run(run())
+
+
+def test_budget_spent_on_reasoning_says_no_answer_was_written(monkeypatch):
+    for q in ("What period must a public deposit have?", "सार्वजनिक जमा की अवधि कितनी होनी चाहिए?"):
+        data = _length_stop(monkeypatch, q, [])
+        assert api.NO_ANSWER in data and api.CUT_SHORT not in data
+
+
+def test_budget_hit_mid_answer_says_cut_short(monkeypatch):
+    data = _length_stop(monkeypatch, "What period must a public deposit have?", ["Twelve to sixty months"])
+    assert api.CUT_SHORT in data and api.NO_ANSWER not in data
+
+
+def test_default_budget_is_6144():
+    assert api.LLM_MAX_TOKENS == 6144

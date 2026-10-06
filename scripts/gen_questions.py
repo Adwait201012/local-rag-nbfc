@@ -33,11 +33,11 @@ MIN_CHARS = 60
 
 # The prompt deliberately names no specific jargon. Listing words taken from
 # failing test questions would teach the index the answers to the test.
-PROMPT = """You are helping index Indian financial regulations so that practitioners can search them.
+PROMPT = """You are helping index Indian laws and regulations so that practitioners can search them.
 
-The passage below comes from the RBI directions titled: {title}
+The passage below comes from {law}, in the document titled: {title}
 
-Write {n} short questions that a compliance officer, banker or company secretary might realistically ask, which this passage directly answers.
+Write {n} short questions that {askers} might realistically ask, which this passage directly answers.
 
 Rules:
 - Each question must make sense on its own. Name the specific subject (the topic, type of company or product), never "these directions" or "this passage".
@@ -73,6 +73,25 @@ def worth_asking(text: str) -> bool:
     return True
 
 
+# Who realistically asks about each body of law, and what to call it. The
+# generated questions should sound like the people who will search that area:
+# a CA asks about income tax differently from an NBFC compliance officer.
+AREAS = {
+    "rbi": ("RBI regulations", "a compliance officer, banker or company secretary"),
+    "income_tax": ("Indian income-tax law", "a chartered accountant, tax practitioner or taxpayer"),
+    "gst": ("Indian GST law", "a chartered accountant, GST practitioner or business owner"),
+    "companies_act": ("Indian company law", "a company secretary, chartered accountant or company director"),
+    "llp": ("Indian LLP law", "a chartered accountant or an LLP partner"),
+}
+
+
+def area_context(area: str | None) -> tuple[str, str]:
+    if area in AREAS:
+        return AREAS[area]
+    law = f"Indian {area.replace('_', ' ')} rules" if area else "Indian regulations"
+    return (law, "a compliance professional, chartered accountant or company secretary")
+
+
 def document_title(source_path: str) -> str:
     name = Path(source_path).stem
     name = re.sub(r"^\d+[_ -]*", "", name)
@@ -94,10 +113,11 @@ def parse_questions(raw: str, n: int = PER_CHUNK) -> list[str]:
     return out[:n]
 
 
-def generate(client: httpx.Client, model: str, text: str, title: str) -> list[str]:
+def generate(client: httpx.Client, model: str, text: str, title: str, area: str | None = None) -> list[str]:
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": PROMPT.format(n=PER_CHUNK, text=text[:3500], title=title)}],
+        "messages": [{"role": "user", "content": PROMPT.format(n=PER_CHUNK, text=text[:3500], title=title,
+                                                       law=area_context(area)[0], askers=area_context(area)[1])}],
         "stream": False,
         "think": False,
         "options": {"temperature": 0.3, "num_ctx": 4096},
@@ -125,17 +145,19 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print every generated question")
     ap.add_argument("--sample", type=int, default=None, help="process N random passages")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--area", default=None, help="only passages from this area, e.g. income_tax")
     args = ap.parse_args()
 
     with psycopg.connect(database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT c.id, c.text, d.source_path FROM chunks c
+                SELECT c.id, c.text, d.source_path, d.area FROM chunks c
                 JOIN documents d ON d.id = c.doc_id
                 WHERE NOT EXISTS (SELECT 1 FROM chunk_questions q WHERE q.chunk_id = c.id)
+                  AND (%s::text IS NULL OR d.area = %s::text)
                 ORDER BY c.id
-            """)
-            todo = [(i, t, document_title(sp)) for i, t, sp in cur.fetchall() if worth_asking(t)]
+            """, (args.area, args.area))
+            todo = [(i, t, document_title(sp), a) for i, t, sp, a in cur.fetchall() if worth_asking(t)]
         if args.sample:
             import random
             todo = random.Random(args.seed).sample(todo, min(args.sample, len(todo)))
@@ -147,9 +169,9 @@ def main() -> int:
 
         client = httpx.Client()
         started, made, failed = time.time(), 0, 0
-        for n, (chunk_id, text, title) in enumerate(todo, 1):
+        for n, (chunk_id, text, title, area) in enumerate(todo, 1):
             try:
-                qs = generate(client, args.model, text, title)
+                qs = generate(client, args.model, text, title, area)
                 if qs:
                     vecs = embed(client, qs)
                     with conn.cursor() as cur:

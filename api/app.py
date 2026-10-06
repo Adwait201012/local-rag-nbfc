@@ -310,8 +310,13 @@ LLM_THINK = os.getenv("LLM_THINK", "true").lower() in ("1", "true", "yes")
 # Hard ceiling on generated tokens, hidden reasoning included. Without it a model
 # stuck repeating itself runs until the client gives up, which is what produced the
 # five-minute timeouts. Real answers here use a few hundred tokens.
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "3072"))
+# 3072 proved too low: on one question the hidden reasoning used the entire budget
+# and no answer text was written at all. 6144 leaves room for long reasoning while
+# still stopping a runaway well before the client's five-minute timeout.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "6144"))
 CUT_SHORT = "\n\n[Answer cut short at the length limit. Try a narrower question.]"
+NO_ANSWER = ("[No answer was written: the model used its whole reasoning budget before "
+             "starting. Please ask again, or split the question into smaller parts.]")
 
 
 async def ollama_chat(messages: list[dict], temperature: float, stream: bool,
@@ -397,6 +402,7 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
     # translation warning is added at the end instead. The opening is held back
     # briefly to decide; the page keeps its "Reasoning..." status meanwhile.
     held, decided, drifted = "", not english_on_purpose, None
+    wrote = False
 
     def open_answer():
         lang = detect_language(held)
@@ -423,6 +429,7 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
                 yield f"event: status\ndata: {json.dumps('thinking')}\n\n"
             piece = message.get("content", "")
             if piece:
+                wrote = True
                 if decided:
                     yield f"event: token\ndata: {json.dumps(piece)}\n\n"
                 else:
@@ -441,7 +448,8 @@ async def stream_answer(query: str, passages: list[dict], temperature: float, la
                 # Say so when the length ceiling stopped the answer, rather than
                 # letting a truncated answer look complete.
                 if chunk.get("done_reason") == "length":
-                    yield f"event: token\ndata: {json.dumps(CUT_SHORT)}\n\n"
+                    notice = CUT_SHORT if wrote else NO_ANSWER
+                    yield f"event: token\ndata: {json.dumps(notice)}\n\n"
                 break
     warn = written_in if written_in in VERIFY_TRANSLATION else drifted
     if warn:
